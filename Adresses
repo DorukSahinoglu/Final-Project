@@ -1,0 +1,130 @@
+import os
+import json
+
+
+LOCATIONS = "locations.json"
+
+def load_locations():
+    if not os.path.exists(LOCATIONS):
+        return []
+    with open(LOCATIONS, "r", encoding="utf-8") as f:
+        return json.load(f)
+    
+
+def save_locations(data):
+    if not data:
+        data = [{
+            "id": 0,
+            "name": "Fabrika",
+            "address": "Mustafa Tayyar Can Cd No:3, Üniversiteler Mahallesi, Çankaya, Ankara, Türkiye"
+        }]
+    else: 
+         if not any(loc.get("id") == 0 for loc in data):
+            data.insert(0, {
+                "id": 0,
+                "name": "Fabrika",
+                "address": "Mustafa Tayyar Can Cd No:3, Üniversiteler Mahallesi, Çankaya, Ankara, Türkiye"
+            })
+    
+    with open(LOCATIONS, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def define_id(locations):
+    if not locations:
+        return 0
+    return max(item["id"] for item in locations) + 1
+
+
+def add_person():
+    name = input("İsim: ").strip()
+    address = input("Adres: ").strip()
+    if not name or not address:
+        print("İsim ve adres boş olamaz")
+        return
+    
+    locations = load_locations()
+    
+    new_id = define_id(locations)
+
+    record = {
+        "id": new_id,
+        "name": name,
+        "address": address
+    }
+    locations.append(record)
+    save_locations(locations)
+
+    print(f"Kayıt eklendi")
+
+
+def list_all():
+    locations = load_locations()
+
+    if not locations:
+        print("Kayıt yok")
+        return
+    print ("Kayıtlı adresler")
+    print("-"*60)
+
+    for x in locations:
+        print(f"ID: {x['id']}")
+        print(f"İsim: {x['name']}")
+        print(f"Adres: {x['address']}")
+        print("-"*60)
+
+
+def delete_person():
+    locations = load_locations()
+    if not locations:
+        print("Silinecek kayıt yok")
+        return   
+    
+    list_all()
+    try:
+        id_to_be_deleted = int(input("Silmek istediğiniz kişinin ID numarasını girin: ").strip())
+    except ValueError:
+        print("Geçersiz ID")
+        return
+    
+    list_New = [p for p in locations if p["id"] != id_to_be_deleted]
+
+    if len(list_New) == len(locations):
+        print("ID bulunamadı")
+        return
+    save_locations(list_New)
+    print("Silme işlemi başarılı")
+    
+
+def main_menu():
+    while(True):
+        print("\nAdres Defteri")
+        print("1. Yeni kişi ekle")
+        print("2. Kişi sil")
+        print("3. Kayıtlı kişileri listele")
+        print("4. Çıkış")
+
+        choice_raw = input("Seçiminiz (1,2,3,4)").strip()
+        
+        try:
+            choice = int(choice_raw)
+
+        except ValueError:
+            print("Geçersiz seçim")
+            continue
+
+        if choice == 1:
+            add_person()
+        elif choice == 2:
+            delete_person()
+        elif choice == 3:
+            list_all()
+        elif choice == 4:
+            break
+        else:
+            print("Geçersiz seçim")
+
+if __name__ == "__main__":
+    main_menu()
+
+

@@ -1,0 +1,267 @@
+import math
+import gurobipy as gp
+from gurobipy import GRB
+
+def solve_vrp(
+    distance_matrix,
+    time_matrix,
+    max_route_time,
+    cost_fixed,
+    cost_per_km,
+    vehicle_capacity = 4
+):
+   
+    
+    N = len(distance_matrix) - 1
+
+  
+    customers = list(range(1, N+1))
+
+   
+    nodes = [0] + customers
+
+    
+    K = N if N >= 1 else 1
+
+   
+    model = gp.Model("EmployeeDropoff_VRP")
+
+    x = model.addVars(
+        [
+            (k, i, j)
+            for k in range(K)
+            for i in nodes
+            for j in nodes
+            if i != j
+        ],
+        vtype = GRB.BINARY,
+        name = "x"
+    )
+
+   
+    y = model.addVars(
+        [
+            (k, i)
+            for k in range(K)
+            for i in customers
+        ],
+        vtype = GRB.BINARY,
+        name = "y"
+    )
+
+    
+    t_car_time = model.addVars(
+        [k for k in range(K)],
+        vtype = GRB.CONTINUOUS,
+        lb   = 0.0,
+        name = "t"
+    )
+
+   
+    u = model.addVars(
+        [
+            (k, i)
+            for k in range(K)
+            for i in customers
+        ],
+        vtype = GRB.CONTINUOUS,
+        lb   = 1.0,
+        ub   = N,
+        name = "u"
+    )
+
+    
+    use = model.addVars(
+        [k for k in range(K)],
+        vtype = GRB.BINARY,
+        name  = "use"
+    )
+
+    
+    model.setObjective(
+        gp.quicksum(
+            distance_matrix[i][j] * cost_per_km * x[k, i, j]
+            for k in range(K)
+            for i in nodes
+            for j in nodes
+            if i != j
+        )
+        +
+        gp.quicksum(
+            cost_fixed * use[k]
+            for k in range(K)
+        ),
+        GRB.MINIMIZE
+    )
+
+   
+
+   
+    for i in customers:
+        model.addConstr(
+            gp.quicksum(
+                x[k, i, j]
+                for k in range(K)
+                for j in nodes
+                if j != i
+            ) == 1,
+            name = f"visit_once_{i}"
+        )
+
+    
+    for k in range(K):
+
+        
+        for i in customers:
+            model.addConstr(
+                gp.quicksum(
+                    x[k, i, j]
+                    for j in nodes
+                    if j != i
+                )
+                -
+                gp.quicksum(
+                    x[k, j, i]
+                    for j in nodes
+                    if j != i
+                )
+                == 0,
+                name = f"flow_conserve_k{k}_i{i}"
+            )
+
+       
+        model.addConstr(
+            gp.quicksum(
+                x[k, 0, j]
+                for j in customers
+            ) <= 1,
+            name = f"leave_depot_once_k{k}"
+        )
+
+        
+        model.addConstr(
+            gp.quicksum(
+                x[k, 0, j]
+                for j in customers
+            ) <= use[k],
+            name = f"use_link_k{k}"
+        )
+
+        
+        model.addConstr(
+            gp.quicksum(
+                y[k, j]
+                for j in customers
+            )
+            <= vehicle_capacity * use[k],
+            name = f"capacity_k{k}"
+        )
+
+       
+        for i in customers:
+            model.addConstr(
+                gp.quicksum(
+                    x[k, j, i]
+                    for j in nodes
+                    if j != i
+                )
+                ==
+                y[k, i],
+                name = f"assign_link_k{k}_i{i}"
+            )
+
+        
+        model.addConstr(
+            t_car_time[k] >= gp.quicksum(
+                time_matrix[i][j] * x[k, i, j]
+                for i in nodes
+                for j in nodes
+                if i != j
+            ),
+            name = f"time_def_k{k}"
+        )
+
+       
+        model.addConstr(
+            t_car_time[k] <= max_route_time,
+            name = f"time_limit_k{k}"
+        )
+
+       
+        for i in customers:
+            for j in customers:
+                if i != j:
+                    model.addConstr(
+                        u[k, i] - u[k, j] + N * x[k, i, j] <= N - 1,
+                        name = f"subtour_k{k}_i{i}_j{j}"
+                    )
+
+    
+    model.optimize()
+
+   
+    result = {
+        "status": model.Status,
+        "objective": None,
+        "vehicles": []
+    }
+
+    if model.Status in [GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.INTERRUPTED]:
+       
+        result["objective"] = model.objVal
+
+        
+        for k in range(K):
+
+           
+            if use[k].X <= 0.5:
+                continue
+
+        
+            next_of = {}
+            for i in nodes:
+                for j in nodes:
+                    if i != j and (k, i, j) in x and x[k, i, j].X > 0.5:
+                        next_of[i] = j
+
+            
+            route_list = [0]
+            current = 0
+            visited = set([0])
+
+            while current in next_of:
+                nxt = next_of[current]
+                route_list.append(nxt)
+
+               
+                if nxt in visited:
+                    break
+
+                visited.add(nxt)
+                current = nxt
+
+           
+            served_customers = [
+                i for i in customers
+                if y[k, i].X > 0.5
+            ]
+
+            
+            load_k = sum(
+                y[k, i].X
+                for i in customers
+            )
+
+           
+            time_k = t_car_time[k].X
+
+            
+            result["vehicles"].append({
+                "vehicle_id": k,
+                "route": route_list,             
+                "served_customers": served_customers,  
+                "num_customers": load_k,      
+                "total_time": time_k             
+            })
+
+    return result
