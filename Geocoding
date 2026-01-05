@@ -6,7 +6,7 @@ import urllib.parse
 import urllib.request
 
 
-GOOGLE_API_KEY = "AIzaSyD8hBjX6bc657VreBr0eTR4kQjeda17ZR"  # buraya Google API key 
+GOOGLE_API_KEY = ""  # buraya Google API key 
 GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -275,3 +275,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
