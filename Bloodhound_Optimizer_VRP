@@ -1,0 +1,220 @@
+import random
+import math
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional, Dict, Set
+
+Point = Tuple[float, float]
+Route = List[int]
+Route_matrix = List[Route]
+Distance_matrix = List[List[float]]
+Edge = Tuple[int, int]
+
+@dataclass
+class Vehicle:
+    vehicle_id: int
+    capacity: float
+    cost_per_km: float
+    speed: float = 1.0
+
+@dataclass
+class SolutionState:
+    routes: Route_matrix
+    vehicle_ids: List[int]
+    route_loads: List[float]
+    route_distances: List[float]
+    route_costs: List[float]
+    total_cost: float
+    feasible: bool
+
+@dataclass
+class HCVRPProblem:
+    coords: List[Point]
+    demands: List[float]
+    vehicles: List[Vehicle]
+    dist: Distance_matrix = field(init = False)
+    n_nodes: int = field(init = False)
+    customer_ids: List[int] = field(init = False)
+
+    def __post_init__(self):
+
+        self.n_nodes = len(self.coords)
+        self.customer_ids = list(range(1, self.n_nodes))
+
+        if len(self.demands) != self.n_nodes:
+
+            raise ValueError("Demands Coords ile aynı olmalı")
+        
+        if self.demands[0] != 0:
+
+            raise ValueError("Depot demand 0 olmalı")
+        
+        if len(self.vehicles) == 0:
+
+            raise ValueError("En az 1 araç tanımlanmalı")
+        
+        self.dist = self.build_tsplib_euc2d_matrix(self.coords)
+
+    @staticmethod
+    def build_tsplib_euc2d_matrix(coords: List[Point]) -> Distance_matrix:
+
+        n = len(coords)
+        dist = [[0.0] * n for _ in range(n)]
+
+        for i in range(n):
+            x1, y1 = coords[i]
+            for j in range(n):
+
+                x2, y2 = coords[j]
+                dx = x1 - x2
+                dy = y1 - y2
+                dij = math.sqrt(dx*dx + dy*dy)
+                dist[i][j] = int(dij + 0.5) 
+        return dist
+    
+    def route_distance(self, route: Route) -> float:
+
+        total = 0.0
+        for i in range(len(route) - 1):
+            total += self.dist[route[i]][route[i + 1]]
+        
+        return total
+    
+    def route_load(self, route: Route) -> float:
+
+        total = 0.0
+        for node in route:
+            total += self.demands[node]
+        
+        return total
+    
+    def customers_covered_once(self, routes: Route_matrix) -> bool:
+
+        seen = []
+        for route in routes:
+            for node in route:
+                if node != 0:
+                    seen.append(node)
+        
+        seen_sorted = sorted(seen)
+        return seen_sorted == self.customer_ids
+    
+
+def normalize_route(route: Route) -> Route:
+
+    core = [node for node in route if node != 0]
+    return [0] + core + [0]
+
+def clone_routes(routes: Route_matrix) -> Route_matrix:
+
+    return [r[:] for n in routes]
+
+def extract_customers(routes: Route_matrix) -> List[int]:
+
+    customers = []
+    for route in routes:
+        for node in route:
+
+            if node != 0:
+                customers.append(node)
+            
+    return customers
+
+def route_has_duplicate_customer(route: Route) -> bool:
+
+    customers = [node for node in route if node != 0]
+    return len(customers) != len(set(customers))
+
+def build_edge_signature_from_routes(routes: Route_matrix) -> Set[Edge]:
+
+    sig = Set[Edge] = set()
+
+    for route in routes:
+        nr = normalize_route(route)
+
+        for i in range(len(nr) - 1):
+            a, b = nr[i], nr[i + 1]
+            edge = (a, b) if a < b else (b, a)
+            sig.add(edge)
+
+    return sig
+
+
+def max_region_similarity(routes: Route_matrix, closed_regions: List[Set[Edge]]) -> float:
+
+    if not closed_regions:
+        return 0.0
+    
+    current_sig = build_edge_signature_from_routes(routes)
+    best_sim = 0.0
+
+    for sig in closed_regions:
+        if not sig:
+            continue
+
+        inter = current_sig & sig
+        sim = len(inter) / len(sig)
+        if sim > best_sim:
+            best_sim = sim
+
+    return best_sim
+
+def evaluate_soution(
+        problem: HCVRPProblem,
+        routes: Route_matrix,
+        vehicle_ids: List[int],
+        infeasible_penalty: float = 1e12
+) -> SolutionState:
+    
+    if len(routes) != len(vehicle_ids):
+        raise ValueError("Routes ve vehicle id uzunluğu aynı olmalı")
+    
+    normalized_routes: Route_matrix = [normalize_route(r) for r in routes]
+
+    route_loads: List[float] = []
+    route_distances: List[float] = []
+    route_costs: List[float] = []
+
+    feasible = True
+
+    for route, v_id in zip(normalized_routes, vehicle_ids):
+
+        if v_id < 0 or v_id > len(problem.vehicles):
+
+            raise ValueError(f"Gecersiz vehicle id: {v_id}")
+        
+        vehicle = problem.vehicles[v_id]
+
+        if route_has_duplicate_customer(route):
+
+            feasible = False
+
+        load = problem.route_load(route)
+        dist = problem.route_distance(route)
+        cost = dist * vehicle.cost_per_km
+
+        if load > vehicle.capacity:
+            
+            feasible = False
+
+        route_loads.append(load)
+        route_distances.append(dist)
+        route_costs.append(cost)
+    
+    all_customers = extract_customers(normalized_routes)
+    if sorted(all_customers) != problem.customer_ids:
+        feasible = False
+
+    total_cost = sum(route_costs)
+    if not feasible:
+        total_cost += infeasible_penalty
+
+    return SolutionState(
+        routes = normalized_routes,
+        vehicle_ids = vehicle_ids[:]
+        route_loads = route_loads,
+        route_distances = route_distances,
+        route_costs = route_costs,
+        total_cost = total_cost,
+        feasible = feasible
+    )
+
