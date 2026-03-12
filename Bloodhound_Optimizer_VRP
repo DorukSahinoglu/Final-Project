@@ -208,13 +208,180 @@ def evaluate_soution(
     if not feasible:
         total_cost += infeasible_penalty
 
-    return SolutionState(
+    return SolutionState(       
         routes = normalized_routes,
-        vehicle_ids = vehicle_ids[:]
+        vehicle_ids = vehicle_ids[:],
         route_loads = route_loads,
         route_distances = route_distances,
         route_costs = route_costs,
         total_cost = total_cost,
         feasible = feasible
     )
+
+def get_vehicle_by_id(problem: HCVRPProblem, vehicle_id: int) -> Vehicle:
+
+    return problem.vehicles[vehicle_id]
+
+def route_core(route: Route) -> List[int]:
+
+    return [node for node in route if node != 0]
+
+def can_append_customer_to_route(
+        problem: HCVRPProblem,
+        route: Route,
+        customer: int,
+        vehicle: Vehicle
+) -> bool:
+    
+    current_load = problem.route_load(normalize_route(route))
+    return current_load + problem.demands[customer] <= vehicle.capacity
+
+def cheapest_feasible_unused_vehicle(
+        problem: HCVRPProblem,
+        required_load: float,
+        used_vehicle_ids: Set[int]
+) -> Optional[int]:
+    
+    candidates = []
+
+    for v in problem.vehicles:
+        if v.vehicle.id in used_vehicle_ids:
+
+            continue
+
+        if v.capacity >= required_load:
+
+            candidates.append(v)
+
+    if not candidates:
+        return None
+    
+    candidates.sort(key = lambda v: (v.cost_per_km, v.capacity))
+    return candidates[0].vehicle.id
+
+
+def best_append_position_by_distance(
+        problem: HCVRPProblem,
+        route: Route,
+        customer: int
+) -> int:
+    
+    nr = normalize_route(route)
+    best_pos = 1
+    best_delta = float("inf")
+
+    for i in range(len(nr) - 1):
+
+        a = nr[i]
+        b = nr[i + 1]
+        old_cost = problem.dist[a][b]
+        new_cost = problem.dist[a][customer] + problem.dist[customer][b]
+
+        delta = new_cost - old_cost
+
+        insert_pos = i + 1
+        if delta < best_delta:
+            best_delta = delta
+            best_pos = insert_pos
+
+    return best_pos
+
+def generate_feasible_solution(
+        problem: HCVRPProblem,
+        sort_by_demands_desc: bool = True,
+        randomize_ties: bool = True,
+        max_attempts: int = 50
+) -> SolutionState:
+    
+    customer_list = problem.customer_ids[:]
+
+    for _ in range(max_attempts):
+
+        customers = customer_list[:]
+
+        if sort_by_demands_desc:
+            if randomize_ties:
+                random.shuffle(customers)
+
+            customers.sort(key = lambda c: problem.demands[c], reverse = True)
+
+        else:
+            random.shuffle(customers)
+
+
+        routes: Route_matrix = []
+        vehicle_ids: List[int] = []
+        used_vehicle_ids: Set[int] = set()
+
+        success = True
+
+        for customer in customers:
+            placed = False
+
+            route_indices = list(range(len(routes)))
+            random.shuffle(route_indices)
+
+            best_choice = None
+            best_choice_delta = float("inf")
+
+            for r_idx in route_indices:
+                v_id = vehicle_ids[r_idx]
+                vehicle = get_vehicle_by_id(problem, v_id)
+                route = routes[r_idx]
+
+                if not can_append_customer_to_route(problem, route, customer, vehicle):
+
+                    continue
+
+                nr = normalize_route(route)
+                pos = best_append_position_by_distance(problem, nr, customer)
+
+                a = nr[pos - 1]
+                b = nr[pos]
+
+                delta = (problem.dist[a][customer] + problem.dist[customer][b] - problem.dist[a][b])
+
+                if delta < best_choice_delta:
+                    best_choice_delta = delta
+                    best_choice = (r_idx, pos)
+
+            if best_choice is not None:
+
+                r_idx, pos = best_choice
+                nr = normalize_route(routes[r_idx])
+                nr.insert(pos, customer)
+                routes[r_idx] = nr
+                placed = True
+
+            if not placed:
+
+                required_load = problem.demands[customer]
+                new_vehicle_id = cheapest_feasible_unused_vehicle(
+                    problem,
+                    required_load = required_load,
+                    used_vehicle_ids = used_vehicle_ids
+                )
+
+                if new_vehicle_id is None:
+
+                    success = False
+                    break
+
+                new_route = [0, customer, 0]
+                routes.append(new_route)
+                vehicle_ids.append(new_vehicle_id)
+                used_vehicle_ids.append(new_vehicle_id)
+                placed = True
+
+        if not success:
+
+            continue
+        
+        state = evaluate_soution(problem, routes, vehicle_ids)
+
+        if state.feasible:
+
+            return state
+    
+    raise RuntimeError("Initial feasible solution uretilemedi")
 
