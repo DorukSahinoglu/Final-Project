@@ -1,0 +1,711 @@
+import random
+import math
+from typing import List, Tuple, Set, Optional
+
+
+#  Tip tanımları
+
+
+Tour = List[int]
+Point = Tuple[float, float]
+Edge = Tuple[int, int]
+RegionSignature = Set[Edge]
+
+
+
+#  Region imzası & benzerlik
+
+
+def build_region_signature(tour: Tour) -> RegionSignature:
+    """
+    Bir turun 'bölge imzası':
+    - Tüm kenarları (i,j) undirected olarak (min, max) şeklinde tutacak.
+    """
+    n = len(tour)
+    sig: RegionSignature = set()
+    for i in range(n):
+        a = tour[i]
+        b = tour[(i + 1) % n]
+        if a < b:
+            sig.add((a, b))
+        else:
+            sig.add((b, a))
+    return sig
+
+
+def max_region_similarity(tour: Tour, closed_regions: List[RegionSignature]) -> float:
+    """
+    Verilen tur, kapatılmış bölgelerden hangisine en çok benziyor?
+    Benzerlik = ortak kenar sayısı / signature boyutu (0..1 arası).
+    """
+    if not closed_regions:
+        return 0.0
+
+    n = len(tour)
+    edges: Set[Edge] = set()
+    for i in range(n):
+        a = tour[i]
+        b = tour[(i + 1) % n]
+        if a < b:
+            edges.add((a, b))
+        else:
+            edges.add((b, a))
+
+    best_sim = 0.0
+    for sig in closed_regions:
+        if not sig:
+            continue
+        inter = edges & sig
+        sim = len(inter) / len(sig)
+        if sim > best_sim:
+            best_sim = sim
+
+    return best_sim
+
+
+
+#  Yardımcı: tur length hesaplama için destek
+
+def tour_length(tour: Tour, dist: List[List[float]]) -> float:
+    """Kapalı TSP turunun uzunluğu."""
+    n = len(tour)
+    total = 0.0
+    for i in range(n):
+        a = tour[i]
+        b = tour[(i + 1) % n]
+        total += dist[a][b]
+    return total
+
+
+
+#  Ruin & Rebuild (Regret-2)
+
+
+def ruin_and_rebuild_regret2(
+    tour: Tour,
+    dist: List[List[float]],
+    ruin_frac: float = 0.25,
+    min_ruin: int = 3,
+    worst_edge_top_k: int = 5
+) -> Tour:
+    """
+    Ruin & Rebuild (Regret-2) operatörü.
+    Ruin:
+      - %80: ardışık segment bozma
+      - %20: en kötü edge civarını bozma
+    Rebuild:
+      - Regret-2 insertion.
+    """
+    n = len(tour)
+    if n <= min_ruin + 2:
+        return tour[:]
+
+    # Kaç node bozacağız?
+    q = max(min_ruin, int(ruin_frac * n))
+    q = min(q, n - 2)  # geride en az 2 node bırakmak için (Garanti amaçlı)
+
+   
+    # 1) Ruin kısımları
+    
+    use_segment = (random.random() < 0.8)
+    removed_indices: List[int] = []
+
+    if use_segment:
+        # A) Segment-based ruin
+        start = random.randint(0, n - 1)
+        removed_indices = [(start + k) % n for k in range(q)]
+    else:
+        # B) Worst-edge centered ruin
+        edges = []
+        for i in range(n):
+            a = tour[i]
+            b = tour[(i + 1) % n]
+            c = dist[a][b]
+            edges.append((c, i))  # (maliyet, edge başlangıç indexi)
+
+        edges.sort(reverse=True, key=lambda x: x[0])
+        top = min(worst_edge_top_k, n)
+        _, worst_idx = random.choice(edges[:top])
+
+        start = worst_idx
+        removed_indices = [(start + k) % n for k in range(q)]
+
+    removed_set = set(removed_indices)
+
+    removed_nodes = [tour[i] for i in removed_indices]
+    remaining_nodes = [node for idx, node in enumerate(tour) if idx not in removed_set]
+
+    partial = remaining_nodes[:]            # P
+    remaining_to_insert = removed_nodes[:]  # U
+
+    
+    # 2) REBUILD (Regret-2)
+    
+    while remaining_to_insert:
+        best_node = None
+        best_pos = None
+        best_regret = -1.0
+
+        m_len = len(partial)
+
+        for node in remaining_to_insert:
+            best1 = float("inf")
+            best2 = float("inf")
+            best_pos_for_node = 0
+
+            for i in range(m_len):
+                a = partial[i]
+                b = partial[(i + 1) % m_len]
+                old_cost = dist[a][b]
+                new_cost = dist[a][node] + dist[node][b]
+                delta = new_cost - old_cost
+
+                if delta < best1:
+                    best2 = best1
+                    best1 = delta
+                    best_pos_for_node = i + 1  # i ve i+1 arasına girecek
+                elif delta < best2:
+                    best2 = delta
+
+            if best2 == float("inf"):
+                best2 = best1
+
+            regret = best2 - best1
+            if regret > best_regret:
+                best_regret = regret
+                best_node = node
+                best_pos = best_pos_for_node
+
+        partial.insert(best_pos, best_node)
+        remaining_to_insert.remove(best_node)
+
+    return partial
+
+
+
+#  Problem ve Kurt sınıfı
+
+
+class TSPProblem:
+    def __init__(self, dist: List[List[float]]):
+        self.dist = dist
+        self.n = len(dist)
+
+    def tour_length(self, tour: Tour) -> float:
+        return tour_length(tour, self.dist)
+
+    def random_tour(self) -> Tour:
+        tour = list(range(self.n))
+        random.shuffle(tour)
+        return tour
+
+
+class Wolf:
+    def __init__(self, problem: TSPProblem):
+        self.problem = problem
+
+        self.tour: Tour = problem.random_tour()
+        self.cost: float = problem.tour_length(self.tour)
+
+        self.best_tour: Tour = self.tour[:]
+        self.best_cost: float = self.cost
+
+        self.blood: float = 0.0
+        self.delta_history: List[float] = []  # acceptance scale için
+
+    def update_if_better(self, tour: Tour):
+        """Dışarıdan verilen tur daha iyiyse kurtun durumunu güncelleme kısmı."""
+        c = self.problem.tour_length(tour)
+        if c < self.best_cost:
+            self.best_cost = c
+            self.best_tour = tour[:]
+        if c < self.cost:
+            self.cost = c
+            self.tour = tour[:]
+
+    
+    #  Basit random 2-opt hamlesi
+    
+    def random_two_opt(self, tour: Tour) -> Tour:
+        n = len(tour)
+        i = random.randint(0, n - 1)
+        k = random.randint(0, n - 1)
+        if i > k:
+            i, k = k, i
+        if i == k:
+            return tour[:]
+        return tour[:i] + tour[i:k+1][::-1] + tour[k+1:]
+
+    
+    #  Serbest arama (explore)
+    
+    def explore(
+        self,
+        iterations: int = 200,
+        a: float = 1.5,
+        p: float = 2.0,
+        C: float = 1.0,
+        b_par: float = 1.2,
+        closed_regions: Optional[List[RegionSignature]] = None,
+        lambda_reg: float = 0.0,
+        
+    ):
+        
+        for _ in range(iterations):
+
+            new_tour = self.random_two_opt(self.tour)
+            old_cost = self.cost
+            new_cost = self.problem.tour_length(new_tour)
+            delta = new_cost - old_cost  # gerçek kötüleşme / iyileşme
+
+            # scale için adaptif delta history
+            self.delta_history.append(abs(delta))
+            if len(self.delta_history) > 50:
+                self.delta_history.pop(0)
+            scale = (sum(self.delta_history) / len(self.delta_history)) + 1e-9
+
+            # Region Penalty kısmı burası
+            region_pen = 0.0
+            if closed_regions and lambda_reg > 0.0:
+                sim = max_region_similarity(new_tour, closed_regions)  # 0..1
+                region_pen = lambda_reg * sim * scale
+
+            effective_delta = delta + region_pen
+            # -----------------------------------
+
+            # 1) İyileştirme (gerçek maliyet bazlı) → direkt kabul
+            if delta <= 0:
+                self.tour = new_tour
+                self.cost = new_cost
+
+                improve_amount = old_cost - new_cost
+                self.blood += max(0.1, improve_amount)
+                if self.blood > 20.0:
+                    self.blood = 20.0
+
+                if new_cost < self.best_cost:
+                    self.best_cost = new_cost
+                    self.best_tour = new_tour[:]
+
+                continue  # sonraki iterasyona geç
+
+            # Kötüleşme → effective_delta üzerinden RNG kapısı
+            d = effective_delta / scale
+            if d < 0:
+                d = 0.0  # emniyet, negatif olursa sorun çıkmasın diye
+
+            p_allow = math.exp(-a * (d ** p))  # d büyüdükçe izin olasılığı düşecek
+
+            if random.random() > p_allow:
+                # RNG kapısı izin vermediyse, reject
+                continue
+
+
+            # 3) Blood bütçesi kapısı (yine effective_delta'ya göre)
+            # 3) Blood bütçesi kapısı
+            penalty = C * (math.exp(b_par * d) - 1.0)
+
+            if self.blood >= penalty:
+                self.blood -= penalty
+                if self.blood < 0.0:
+                 self.blood = 0.0
+
+                self.tour = new_tour
+                self.cost = new_cost
+            else:
+                continue
+
+
+
+
+#  Alpha komşuları (seed)
+
+
+def two_opt_move(tour: Tour, i: int, k: int) -> Tour:
+    if i > k:
+        i, k = k, i
+    if i == k:
+        return tour[:]
+    return tour[:i] + tour[i:k+1][::-1] + tour[k+1:]
+
+
+def generate_alpha_neighbors_2opt(
+    alpha_tour: Tour,
+    problem: TSPProblem,
+    num_neighbors: int = 9,
+    max_trials: int = 200
+) -> List[Tour]:
+    
+    seen = set()
+    candidates: List[Tuple[float, Tour]] = []
+
+    base_cost = problem.tour_length(alpha_tour)
+    n = len(alpha_tour)
+    trials = 0
+
+    while trials < max_trials and len(candidates) < num_neighbors * 3:
+        i = random.randint(0, n - 1)
+        k = random.randint(0, n - 1)
+        if i == k:
+            continue
+
+        new_tour = two_opt_move(alpha_tour, i, k)
+        key = tuple(new_tour)
+        if key in seen:
+            trials += 1
+            continue
+        seen.add(key)
+
+        c = problem.tour_length(new_tour)
+        candidates.append((c, new_tour))
+        trials += 1
+
+    
+    candidates.append((base_cost, alpha_tour[:]))
+    candidates.sort(key=lambda x: x[0])
+
+    best_seeds = [t for (c, t) in candidates[:num_neighbors]]
+    return best_seeds
+
+def walk_towards_seed_by_swaps(
+    wolf: Wolf,
+    target_tour: Tour,
+    problem: TSPProblem,
+    max_steps: int | None = None,
+) -> Tuple[Tour, float]:
+    """
+    Kurtun mevcut turundan (wolf.tour) target_tour'a doğru,
+   
+    """
+    current = wolf.tour[:]
+    n = len(current)
+    if max_steps is None:
+        max_steps = n  # en fazla n swap, isterse tam eşitleyebilir
+
+    for _ in range(max_steps):
+        # Hangi pozisyonlarda farklıyız?
+        mismatch_index = -1
+        for i in range(n):
+            if current[i] != target_tour[i]:
+                mismatch_index = i
+                break
+
+        if mismatch_index == -1:
+            # Zaten hedefle aynı turdaysan kır
+            break
+
+        i = mismatch_index
+        desired_city = target_tour[i]
+
+        
+        j = current.index(desired_city)
+
+        # i ve j'yi swap et
+        if i != j:
+            current[i], current[j] = current[j], current[i]
+
+        # Yeni maliyeti hesapla
+        new_cost = problem.tour_length(current)
+
+        # Bu ara çözümde iyiyse kurtun best'ini güncelle
+        wolf.update_if_better(current)
+
+        # Kurtun current durumunu da bu tura çek
+        wolf.tour = current[:]
+        wolf.cost = new_cost
+
+    # Son durumda current turu ve maliyeti döndür
+    final_cost = problem.tour_length(current)
+    return current, final_cost
+
+
+#  Sürü fonksiyonları
+
+
+def free_search_phase(
+    wolves: List[Wolf],
+    iterations_per_wolf: int = 200,
+    closed_regions: Optional[List[RegionSignature]] = None,
+    lambda_reg: float = 0.0,
+):
+    """
+    Her kurt için serbest arama fazı (explore).
+    Region banlama için closed_regions ve lambda_reg parametreleri burada geçiliyor.
+    """
+    for w in wolves:
+        w.explore(
+            iterations=iterations_per_wolf,
+            closed_regions=closed_regions,
+            lambda_reg=lambda_reg,
+        )
+
+
+def select_alpha_index(wolves: List[Wolf]) -> int:
+    """
+    En yüksek blood'a sahip kurdun index'ini döner.
+    Tie olursa best_cost'a bakılıyor.
+    """
+    best_idx = 0
+    best_score = (wolves[0].blood, -wolves[0].best_cost)
+    for i in range(1, len(wolves)):
+        score = (wolves[i].blood, -wolves[i].best_cost)
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    return best_idx
+
+
+def hunt_around_alpha(
+    wolves: List[Wolf],
+    alpha_idx: int,
+    problem: TSPProblem,
+    ruin_frac: float = 0.25,
+    rr_repeats: int = 2,
+    walk_steps: int = None,  # None -> n adım
+) -> Tuple[Tour, float]:
+    """
+    1 avın "alpha etrafında avlanma" fazı:
+      - Alfayı seç
+      - Alfa turundan (kurt sayısı - 1) tane seed komşu üret
+      - Alpha dışındaki tüm kurtlar:
+          * Kendi mevcut turundan, swap atarak seed'e doğru yürür
+          * Yolda daha iyi çözüm bulursa kaydedilir
+          * Son durumda (yaklaşılmış) tur üzerinde Ruin&Rebuild yapılır
+      - En iyi bulunan çözüme göre alfayı güncelle
+    """
+    alpha = wolves[alpha_idx]
+    alpha_seed_tour = alpha.best_tour[:]  # alfayı best_tour üzerinden okuyalım
+    alpha_seed_cost = alpha.best_cost
+
+    # 1) Kullanılacak komşu sayısı: kurt sayısı - 1
+    num_neighbors = max(1, len(wolves) - 1)
+
+    # Alfa etrafında seed komşular
+    seeds = generate_alpha_neighbors_2opt(
+        alpha_seed_tour,
+        problem,
+        num_neighbors=num_neighbors
+    )
+
+    # 2) Alfa dışındaki tüm kurtlar avcı
+    hunter_indices = [i for i in range(len(wolves)) if i != alpha_idx]
+    hunter_indices = hunter_indices[:len(seeds)]
+
+    global_best_tour = alpha_seed_tour[:]
+    global_best_cost = alpha_seed_cost
+
+    n = problem.n
+    if walk_steps is None:
+        walk_steps = n  
+
+    # 3) Her avcı kurt için: önce swap yürüyüşü, sonra ruin&rebuild
+    for w_idx, seed_tour in zip(hunter_indices, seeds):
+        w = wolves[w_idx]
+
+        # 3A) Kurtun mevcut turundan seed_tour'a doğru swap atarak yaklaş
+        current, current_cost = walk_towards_seed_by_swaps(
+            w,
+            seed_tour,
+            problem,
+            max_steps=walk_steps,
+        )
+
+        # 3B) Yaklaşılmış tur üzerinden Ruin&Rebuild intensification
+        for _ in range(rr_repeats):
+            new_tour = ruin_and_rebuild_regret2(
+                current,
+                problem.dist,
+                ruin_frac=ruin_frac
+            )
+            new_cost = problem.tour_length(new_tour)
+            if new_cost < current_cost:
+                current = new_tour
+                current_cost = new_cost
+
+        # Kurtun durumunu güncelle
+        w.update_if_better(current)
+
+        # Av içi global en iyi kontrolü
+        if current_cost < global_best_cost:
+            global_best_cost = current_cost
+            global_best_tour = current[:]
+
+    # 4) Alfayı da en iyi çözüme çek
+    alpha.update_if_better(global_best_tour)
+
+    return global_best_tour, global_best_cost
+
+
+
+
+def run_wolfpack(
+    problem: TSPProblem,
+    num_wolves: int = 10,
+    num_hunts: int = 10,
+    explore_iterations: int = 200,
+    ruin_frac: float = 0.25,
+    rr_repeats: int = 2,
+    lambda_reg: float = 1.0,  # region penalty katsayısı
+    reserve_blood: float = 4.0,   # <<< EKLE
+) -> Tuple[Tour, float]:
+    """
+    Tüm framework'ün ana döngüsü:
+      - Sürü oluştur
+      - num_hunts kere:
+          * blood ve delta_history resetle
+          * serbest arama fazı (explore, region penalized)
+          * alfayı seç
+          * alpha etrafında av (hunt_around_alpha)
+          * av sonunda o bölgeyi kapat (region signature ekle)
+    """
+    wolves = [Wolf(problem) for _ in range(num_wolves)]
+
+    global_best_tour = wolves[0].best_tour[:]
+    global_best_cost = wolves[0].best_cost
+
+    for w in wolves[1:]:
+        if w.best_cost < global_best_cost:
+            global_best_cost = w.best_cost
+            global_best_tour = w.best_tour[:]
+
+    # Kapalı bölgeler listesi
+    closed_regions: List[RegionSignature] = []
+
+    for h in range(num_hunts):
+        # Av başında blood ve delta geçmişini sıfırlama
+        for w in wolves:
+            w.blood = reserve_blood
+            w.delta_history.clear()
+
+        # Serbest arama (blood toplama, region penalized)
+        free_search_phase(
+            wolves,
+            iterations_per_wolf=explore_iterations,
+            closed_regions=closed_regions,
+            lambda_reg=lambda_reg,
+        )
+
+        # Alfa seçimi
+        alpha_idx = select_alpha_index(wolves)
+
+        # Alfa etrafında av
+        best_tour_hunt, best_cost_hunt = hunt_around_alpha(
+            wolves,
+            alpha_idx,
+            problem,
+            ruin_frac=ruin_frac,
+            rr_repeats=rr_repeats,
+        )
+
+        # Global en iyiyi güncelle
+        if best_cost_hunt < global_best_cost:
+            global_best_cost = best_cost_hunt
+            global_best_tour = best_tour_hunt[:]
+
+        # (region signature ekle)
+        sig = build_region_signature(best_tour_hunt)
+        closed_regions.append(sig)
+
+        print(
+            f"Hunt {h+1}/{num_hunts} - best cost so far: {global_best_cost:.2f}, "
+            f"closed regions: {len(closed_regions)}"
+        )
+
+    return global_best_tour, global_best_cost
+
+
+
+coords_eil51 = [
+    (37, 52),
+    (49, 49),
+    (52, 64),
+    (20, 26),
+    (40, 30),
+    (21, 47),
+    (17, 63),
+    (31, 62),
+    (52, 33),
+    (51, 21),
+    (42, 41),
+    (31, 32),
+    (5, 25),
+    (12, 42),
+    (36, 16),
+    (52, 41),
+    (27, 23),
+    (17, 33),
+    (13, 13),
+    (57, 58),
+    (62, 42),
+    (42, 57),
+    (16, 57),
+    (8, 52),
+    (7, 38),
+    (27, 68),
+    (30, 48),
+    (43, 67),
+    (58, 48),
+    (58, 27),
+    (37, 69),
+    (38, 46),
+    (46, 10),
+    (61, 33),
+    (62, 63),
+    (63, 69),
+    (32, 22),
+    (45, 35),
+    (59, 15),
+    (5, 6),
+    (10, 17),
+    (21, 10),
+    (5, 64),
+    (30, 15),
+    (39, 10),
+    (32, 39),
+    (25, 32),
+    (25, 55),
+    (48, 28),
+    (56, 37),
+    (30, 40),
+]
+
+
+
+
+
+
+
+def tsplib_euc2d_matrix(coords: List[Point]) -> List[List[float]]:
+    
+    n = len(coords)
+    dist = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        x1, y1 = coords[i]
+        for j in range(n):
+            x2, y2 = coords[j]
+            dx = x1 - x2
+            dy = y1 - y2
+            dij = math.sqrt(dx * dx + dy * dy)
+            dist[i][j] = int(dij + 0.5)
+    return dist
+
+
+if __name__ == "__main__":
+      
+
+    dist_eil76 = tsplib_euc2d_matrix(coords_eil51)
+    problem = TSPProblem(dist_eil76)
+
+    best_tour, best_cost = run_wolfpack(
+        problem,
+        num_wolves=50,
+        num_hunts=30,
+        explore_iterations=300,
+        ruin_frac=0.40 ,
+        rr_repeats=5,
+        lambda_reg=0.8,
+        reserve_blood= 40
+    )
+
+    print("\nFinal best cost:", best_cost)
+    print("Best tour (0-based indices):", best_tour)
