@@ -1,0 +1,664 @@
+import random
+import math
+from typing import List, Tuple, Dict, Any
+import optuna
+
+Chromosome = List[int]
+Route = List[int]
+
+DEPOT = 0
+TAXI_CAPACITY = 4
+FIXED_TAXI_COST = 110
+COST_PER_KM = 7
+
+EPS = 1e-9
+
+BASE_SEEDS = list(range(1, 21))
+N_TRIALS_PER_SEED = 50
+TIMEOUT_PER_SEED_SEC = None
+
+OPTIMIZE_MODE = "f1"
+W2 = 0.02
+W3 = 0.02
+
+SEARCH_SPACE = {
+    "pop_size": (100, 100),
+    "generations": [1500, 1500],
+    "crossover_rate": (0.97, 1.0),
+    "base_mutation_rate": (0.00, 0.05),
+    "boost_mutation_rate": (0.3, 0.55),
+    "mutation_kind": ["swap"],
+    "tournament_k": (4, 8),
+    "dup_penalty_step": ((5, 7.5), (25, 40)),
+}
+
+TOP_K_PER_SEED = 3
+
+
+def route_distance(route: Route, dist: List[List[float]]) -> float:
+    if not route:
+        return 0.0
+    total = dist[DEPOT][route[0]]
+    for i in range(len(route) - 1):
+        total += dist[route[i]][route[i + 1]]
+    return total
+
+
+def route_duration(route: Route, time: List[List[float]]) -> float:
+    if not route:
+        return 0.0
+    total = time[DEPOT][route[0]]
+    for i in range(len(route) - 1):
+        total += time[route[i]][route[i + 1]]
+    return total
+
+
+def random_giant_tour(n_customers: int, rng: random.Random) -> Chromosome:
+    tour = list(range(1, n_customers + 1))
+    rng.shuffle(tour)
+    return tour
+
+
+class Individual:
+    def __init__(self, chromosome: Chromosome):
+        self.chromosome = chromosome[:]
+        self.f1_total_cost: float = float("inf")
+        self.f2_max_route_duration: float = float("inf")
+        self.f3_avg_route_duration: float = float("inf")
+        self.rank: int = 10**9
+        self.crowding: float = 0.0
+        self.domination_set: List["Individual"] = []
+        self.domination_count: int = 0
+
+
+def init_population(pop_size: int, n_customers: int, seed: int = 46) -> List[Individual]:
+    rng = random.Random(seed)
+    pop: List[Individual] = []
+    for _ in range(pop_size):
+        chrom = random_giant_tour(n_customers, rng)
+        pop.append(Individual(chrom))
+    return pop
+
+
+def ox_crossover(p1: Chromosome, p2: Chromosome, rng: random.Random) -> Tuple[Chromosome, Chromosome]:
+    n = len(p1)
+    assert n == len(p2)
+    a, b = sorted(rng.sample(range(n), 2))
+
+    def make_child(parent_a: Chromosome, parent_b: Chromosome) -> Chromosome:
+        child = [-1] * n
+        child[a: b + 1] = parent_a[a: b + 1]
+        used = set(child[a: b + 1])
+        idx = (b + 1) % n
+        for gene in parent_b:
+            if gene in used:
+                continue
+            child[idx] = gene
+            idx = (idx + 1) % n
+        return child
+
+    c1 = make_child(p1, p2)
+    c2 = make_child(p2, p1)
+    return c1, c2
+
+
+def swap_mutation(ch: Chromosome, rng: random.Random) -> Chromosome:
+    n = len(ch)
+    i, j = rng.sample(range(n), 2)
+    out = ch[:]
+    out[i], out[j] = out[j], out[i]
+    return out
+
+
+def inversion_mutation(ch: Chromosome, rng: random.Random) -> Chromosome:
+    n = len(ch)
+    i, j = sorted(rng.sample(range(n), 2))
+    out = ch[:]
+    out[i: j + 1] = reversed(out[i: j + 1])
+    return out
+
+
+def make_offspring(
+    parents: List[Individual],
+    rng: random.Random,
+    crossover_rate: float = 0.9,
+    mutation_rate: float = 0.02,
+    mutation_kind: str = "swap",
+) -> List[Individual]:
+    offspring: List[Individual] = []
+    n = len(parents)
+
+    def mutate(ch: Chromosome) -> Chromosome:
+        if mutation_kind == "inversion":
+            return inversion_mutation(ch, rng)
+        return swap_mutation(ch, rng)
+
+    i = 0
+    while len(offspring) < n:
+        p1 = parents[i % n].chromosome
+        p2 = parents[(i + 1) % n].chromosome
+        i += 2
+
+        if rng.random() < crossover_rate:
+            c1, c2 = ox_crossover(p1, p2, rng)
+        else:
+            c1, c2 = p1[:], p2[:]
+
+        if rng.random() < mutation_rate:
+            c1 = mutate(c1)
+        if rng.random() < mutation_rate:
+            c2 = mutate(c2)
+
+        offspring.append(Individual(c1))
+        if len(offspring) < n:
+            offspring.append(Individual(c2))
+
+    return offspring
+
+
+def dominates(a: "Individual", b: "Individual") -> bool:
+    a_vals = (a.f1_total_cost, a.f2_max_route_duration, a.f3_avg_route_duration)
+    b_vals = (b.f1_total_cost, b.f2_max_route_duration, b.f3_avg_route_duration)
+
+    no_worse_all = True
+    better_at_least_one = False
+
+    for av, bv in zip(a_vals, b_vals):
+        if av > bv:
+            no_worse_all = False
+            break
+        if av < bv:
+            better_at_least_one = True
+
+    return no_worse_all and better_at_least_one
+
+
+def fast_non_dominated_sort(population: List["Individual"]) -> List[List["Individual"]]:
+    for p in population:
+        p.domination_set = []
+        p.domination_count = 0
+        p.rank = 10**9
+
+    fronts: List[List[Individual]] = []
+    F1: List[Individual] = []
+
+    for i, p in enumerate(population):
+        for j in range(i + 1, len(population)):
+            q = population[j]
+            if dominates(p, q):
+                p.domination_set.append(q)
+                q.domination_count += 1
+            elif dominates(q, p):
+                q.domination_set.append(p)
+                p.domination_count += 1
+
+    for p in population:
+        if p.domination_count == 0:
+            p.rank = 1
+            F1.append(p)
+
+    fronts.append(F1)
+
+    k = 0
+    while k < len(fronts) and fronts[k]:
+        next_front: List[Individual] = []
+        for p in fronts[k]:
+            for q in p.domination_set:
+                q.domination_count -= 1
+                if q.domination_count == 0:
+                    q.rank = k + 2
+                    next_front.append(q)
+        k += 1
+        if next_front:
+            fronts.append(next_front)
+
+    return fronts
+
+
+def assign_crowding_distance(front: List["Individual"]) -> None:
+    if not front:
+        return
+
+    for ind in front:
+        ind.crowding = 0.0
+
+    objectives = [
+        ("f1_total_cost",),
+        ("f2_max_route_duration",),
+        ("f3_avg_route_duration",),
+    ]
+
+    n = len(front)
+    if n <= 2:
+        for ind in front:
+            ind.crowding = float("inf")
+        return
+
+    for (attr,) in objectives:
+        front.sort(key=lambda x: getattr(x, attr))
+
+        front[0].crowding = float("inf")
+        front[-1].crowding = float("inf")
+
+        f_min = getattr(front[0], attr)
+        f_max = getattr(front[-1], attr)
+        denom = f_max - f_min
+
+        if denom <= 1e-12:
+            continue
+
+        for i in range(1, n - 1):
+            prev_v = getattr(front[i - 1], attr)
+            next_v = getattr(front[i + 1], attr)
+            front[i].crowding += (next_v - prev_v) / denom
+
+
+def environmental_selection_elitist(parents: List["Individual"], offspring: List["Individual"], pop_size: int) -> List["Individual"]:
+    R = parents + offspring
+    fronts = fast_non_dominated_sort(R)
+
+    next_pop: List[Individual] = []
+    for front in fronts:
+        assign_crowding_distance(front)
+
+        if len(next_pop) + len(front) <= pop_size:
+            next_pop.extend(front)
+        else:
+            remaining = pop_size - len(next_pop)
+            front.sort(key=lambda x: x.crowding, reverse=True)
+            next_pop.extend(front[:remaining])
+            break
+
+    return next_pop
+
+
+def tournament_pick(population: List["Individual"], rng: random.Random, k: int = 2) -> "Individual":
+    contestants = rng.sample(population, k)
+    best = contestants[0]
+    for c in contestants[1:]:
+        if c.rank < best.rank:
+            best = c
+        elif c.rank == best.rank and c.crowding > best.crowding:
+            best = c
+    return best
+
+
+def build_mating_pool(population: List["Individual"], pool_size: int, seed: int = 123, tournament_k: int = 2) -> List["Individual"]:
+    rng = random.Random(seed)
+    mating_pool: List[Individual] = []
+    for _ in range(pool_size):
+        mating_pool.append(tournament_pick(population, rng, k=tournament_k))
+    return mating_pool
+
+
+def apply_duplicate_penalty(pop: List["Individual"], penalty_step: float = 10.0) -> None:
+    buckets = {}
+    for ind in pop:
+        key = tuple(ind.chromosome)
+        buckets.setdefault(key, []).append(ind)
+
+    for _, inds in buckets.items():
+        if len(inds) <= 1:
+            continue
+        for k, ind in enumerate(inds):
+            if k == 0:
+                continue
+            ind.f1_total_cost += k * penalty_step
+
+
+def segment_route_cost(route: List[int], dist: List[List[float]]) -> float:
+    return FIXED_TAXI_COST + COST_PER_KM * route_distance(route, dist)
+
+
+def decode_giant_tour_min_cost_dp(
+    chromosome: List[int],
+    dist: List[List[float]],
+    capacity: int = TAXI_CAPACITY
+) -> Tuple[List[List[int]], float]:
+    n = len(chromosome)
+    INF = 1e30
+
+    dp = [INF] * (n + 1)
+    prev = [-1] * (n + 1)
+    dp[0] = 0.0
+
+    for i in range(n):
+        if dp[i] >= INF:
+            continue
+        for L in range(1, capacity + 1):
+            j = i + L
+            if j > n:
+                break
+            route = chromosome[i:j]
+            c = segment_route_cost(route, dist)
+            if dp[i] + c < dp[j]:
+                dp[j] = dp[i] + c
+                prev[j] = i
+
+    if prev[n] == -1 and n > 0:
+        raise RuntimeError("Decode failed: no feasible split found (should not happen with capacity>=1).")
+
+    routes: List[List[int]] = []
+    cur = n
+    while cur > 0:
+        i = prev[cur]
+        if i < 0:
+            raise RuntimeError("Backtracking failed in decode.")
+        routes.append(chromosome[i:cur])
+        cur = i
+    routes.reverse()
+    return routes, dp[n]
+
+
+def evaluate_individual_vrp(ind: "Individual", dist: List[List[float]], time: List[List[float]]) -> None:
+    routes, total_cost = decode_giant_tour_min_cost_dp(ind.chromosome, dist, capacity=TAXI_CAPACITY)
+
+    durations = [route_duration(r, time) for r in routes]
+    if not durations:
+        max_dur = 0.0
+        avg_dur = 0.0
+    else:
+        max_dur = max(durations)
+        avg_dur = sum(durations) / len(durations)
+
+    ind.f1_total_cost = total_cost
+    ind.f2_max_route_duration = max_dur
+    ind.f3_avg_route_duration = avg_dur
+
+
+def evaluate_population_vrp(pop: List["Individual"], dist: List[List[float]], time: List[List[float]]) -> None:
+    for ind in pop:
+        evaluate_individual_vrp(ind, dist, time)
+
+
+def prepare_rank_and_crowding(population: List["Individual"]) -> None:
+    fronts = fast_non_dominated_sort(population)
+    for front in fronts:
+        assign_crowding_distance(front)
+
+
+def run_nsga2_once(
+    distance_matrix: List[List[float]],
+    time_matrix: List[List[float]],
+    seed: int,
+    pop_size: int,
+    generations: int,
+    crossover_rate: float,
+    base_mutation_rate: float,
+    boost_mutation_rate: float,
+    mutation_kind: str,
+    tournament_k: int,
+    dup_penalty_step: float,
+) -> Tuple[float, Dict[str, Any]]:
+    n_customers = len(distance_matrix) - 1
+    rng = random.Random(seed)
+
+    P = init_population(pop_size, n_customers, seed=seed)
+
+    evaluate_population_vrp(P, distance_matrix, time_matrix)
+    apply_duplicate_penalty(P, penalty_step=dup_penalty_step)
+
+    for gen in range(generations):
+        prepare_rank_and_crowding(P)
+
+        mut_rate = base_mutation_rate
+        if all(ind.rank == 1 for ind in P):
+            mut_rate = boost_mutation_rate
+
+        mating_pool = build_mating_pool(
+            P, pool_size=pop_size, seed=seed + 2000 + gen, tournament_k=tournament_k
+        )
+
+        Q = make_offspring(
+            parents=mating_pool,
+            rng=rng,
+            crossover_rate=crossover_rate,
+            mutation_rate=mut_rate,
+            mutation_kind=mutation_kind,
+        )
+
+        evaluate_population_vrp(Q, distance_matrix, time_matrix)
+        apply_duplicate_penalty(Q, penalty_step=dup_penalty_step)
+
+        P = environmental_selection_elitist(P, Q, pop_size)
+
+    prepare_rank_and_crowding(P)
+    f1_front = [x for x in P if x.rank == 1]
+    if not f1_front:
+        best = min(P, key=lambda z: (z.f1_total_cost, z.f2_max_route_duration, z.f3_avg_route_duration))
+    else:
+        best = min(f1_front, key=lambda z: (z.f1_total_cost, z.f2_max_route_duration, z.f3_avg_route_duration))
+
+    if OPTIMIZE_MODE == "weighted":
+        score = best.f1_total_cost + W2 * best.f2_max_route_duration + W3 * best.f3_avg_route_duration
+    else:
+        score = best.f1_total_cost
+
+    details = {
+        "best_f1": best.f1_total_cost,
+        "best_f2": best.f2_max_route_duration,
+        "best_f3": best.f3_avg_route_duration,
+        "best_chromosome": best.chromosome[:],
+    }
+    return float(score), details
+
+
+def suggest_float_piecewise(trial, name, space):
+    if isinstance(space[0], (list, tuple)):
+        idx = trial.suggest_categorical(f"{name}__range", list(range(len(space))))
+        low, high = space[idx]
+        return trial.suggest_float(name, low, high)
+    else:
+        low, high = space
+        return trial.suggest_float(name, low, high)
+
+
+def suggest_int_piecewise(trial, name, space):
+    if isinstance(space[0], (list, tuple)):
+        idx = trial.suggest_categorical(f"{name}__range", list(range(len(space))))
+        low, high = space[idx]
+        return trial.suggest_int(name, low, high)
+    else:
+        low, high = space
+        return trial.suggest_int(name, low, high)
+
+
+def suggest_params(trial: optuna.Trial) -> Dict[str, Any]:
+    params = {
+        "pop_size": suggest_int_piecewise(trial, "pop_size", SEARCH_SPACE["pop_size"]),
+        "generations": suggest_int_piecewise(trial, "generations", SEARCH_SPACE["generations"]),
+        "crossover_rate": suggest_float_piecewise(trial, "crossover_rate", SEARCH_SPACE["crossover_rate"]),
+        "base_mutation_rate": suggest_float_piecewise(trial, "base_mutation_rate", SEARCH_SPACE["base_mutation_rate"]),
+        "boost_mutation_rate": suggest_float_piecewise(trial, "boost_mutation_rate", SEARCH_SPACE["boost_mutation_rate"]),
+        "mutation_kind": trial.suggest_categorical("mutation_kind", SEARCH_SPACE["mutation_kind"]),
+        "tournament_k": suggest_int_piecewise(trial, "tournament_k", SEARCH_SPACE["tournament_k"]),
+        "dup_penalty_step": suggest_float_piecewise(trial, "dup_penalty_step", SEARCH_SPACE["dup_penalty_step"]),
+    }
+
+    if params["boost_mutation_rate"] < params["base_mutation_rate"]:
+        params["boost_mutation_rate"], params["base_mutation_rate"] = (
+            params["base_mutation_rate"],
+            params["boost_mutation_rate"],
+        )
+
+    return params
+
+
+def bayes_search_for_seed(
+    distance_matrix: List[List[float]],
+    time_matrix: List[List[float]],
+    seed: int,
+    top_k: int = TOP_K_PER_SEED,
+) -> Dict[str, Any]:
+    def objective(trial: optuna.Trial) -> float:
+        params = suggest_params(trial)
+
+        if params["tournament_k"] > params["pop_size"]:
+            raise optuna.exceptions.TrialPruned()
+
+        score, details = run_nsga2_once(
+            distance_matrix=distance_matrix,
+            time_matrix=time_matrix,
+            seed=seed,
+            pop_size=params["pop_size"],
+            generations=params["generations"],
+            crossover_rate=params["crossover_rate"],
+            base_mutation_rate=params["base_mutation_rate"],
+            boost_mutation_rate=params["boost_mutation_rate"],
+            mutation_kind=params["mutation_kind"],
+            tournament_k=params["tournament_k"],
+            dup_penalty_step=params["dup_penalty_step"],
+        )
+
+        trial.set_user_attr("best_f1", details["best_f1"])
+        trial.set_user_attr("best_f2", details["best_f2"])
+        trial.set_user_attr("best_f3", details["best_f3"])
+        return score
+
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=N_TRIALS_PER_SEED, timeout=TIMEOUT_PER_SEED_SEC)
+
+    complete_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None]
+    complete_trials.sort(key=lambda t: t.value)
+
+    top_trials = []
+    for t in complete_trials[:top_k]:
+        top_trials.append({
+            "number": t.number,
+            "score": float(t.value),
+            "params": dict(t.params),
+            "best_f1": t.user_attrs.get("best_f1", None),
+            "best_f2": t.user_attrs.get("best_f2", None),
+            "best_f3": t.user_attrs.get("best_f3", None),
+        })
+
+    best = study.best_trial
+    out = {
+        "seed": seed,
+        "n_trials_total": len(study.trials),
+        "n_trials_complete": len(complete_trials),
+        "best_score": float(best.value),
+        "best_params": dict(best.params),
+        "best_f1": best.user_attrs.get("best_f1", None),
+        "best_f2": best.user_attrs.get("best_f2", None),
+        "best_f3": best.user_attrs.get("best_f3", None),
+        "top_trials": top_trials,
+    }
+    return out
+
+
+if __name__ == "__main__":
+    distance_matrix = [
+        [],
+    ]
+
+    time_matrix = [
+        [],
+    ]
+
+    if not distance_matrix or not time_matrix:
+        raise ValueError("distance_matrix ve time_matrix boş. 0 depot dahil olacak şekilde doldur.")
+    if len(distance_matrix) != len(time_matrix):
+        raise ValueError("distance_matrix ve time_matrix boyutu aynı olmalı.")
+    if any(len(r) != len(distance_matrix) for r in distance_matrix):
+        raise ValueError("distance_matrix kare olmalı.")
+    if any(len(r) != len(time_matrix) for r in time_matrix):
+        raise ValueError("time_matrix kare olmalı.")
+    if len(distance_matrix) < 2:
+        raise ValueError("En az 1 müşteri olmalı (matris >= 2x2).")
+
+    print(f"OPTIMIZE_MODE = {OPTIMIZE_MODE}")
+    if OPTIMIZE_MODE == "weighted":
+        print(f"Weighted: score = f1 + {W2}*f2 + {W3}*f3")
+
+    all_results = []
+    for s in BASE_SEEDS:
+        print("\n" + "=" * 70)
+        print(f"Seed {s} için Bayes araması başlıyor... (trials={N_TRIALS_PER_SEED})")
+
+        res = bayes_search_for_seed(distance_matrix, time_matrix, seed=s, top_k=TOP_K_PER_SEED)
+        all_results.append(res)
+
+        print(f"[Seed {s}] Complete trials: {res['n_trials_complete']}/{res['n_trials_total']}")
+        print(f"[Seed {s}] Best score: {res['best_score']:.6f}")
+        print(f"[Seed {s}] Best params: {res['best_params']}")
+        if res["best_f1"] is not None:
+            print(f"[Seed {s}] Best (f1,f2,f3): {res['best_f1']:.4f}, {res['best_f2']:.4f}, {res['best_f3']:.4f}")
+
+        print(f"\nSeed {res['seed']} | Top {len(res['top_trials'])} sonuç:")
+        for i, t in enumerate(res["top_trials"], 1):
+            f1 = t.get("best_f1", None)
+            f2 = t.get("best_f2", None)
+            f3 = t.get("best_f3", None)
+
+            f1s = f"{f1:.4f}" if isinstance(f1, (int, float)) else "NA"
+            f2s = f"{f2:.4f}" if isinstance(f2, (int, float)) else "NA"
+            f3s = f"{f3:.4f}" if isinstance(f3, (int, float)) else "NA"
+
+            print(
+                f"  #{i} | trial={t['number']} | score={t['score']:.6f} | "
+                f"f1={f1s}, f2={f2s}, f3={f3s}\n"
+                f"      params={t['params']}"
+            )
+
+    best_overall = min(all_results, key=lambda x: x["best_score"])
+
+    print("\n" + "#" * 70)
+    print("GENEL EN İYİ SONUÇ (Seed bazında TOP1)")
+    print(f"Best seed: {best_overall['seed']}")
+    print(f"Best score: {best_overall['best_score']:.6f}")
+    print(f"Best params: {best_overall['best_params']}")
+    if best_overall["best_f1"] is not None:
+        print(f"Best (f1,f2,f3): {best_overall['best_f1']:.4f}, {best_overall['best_f2']:.4f}, {best_overall['best_f3']:.4f}")
+
+    print("\n" + "#" * 70)
+    print("HER SEED İÇİN TOP3 ÖZET")
+    for res in all_results:
+        print("\n" + "-" * 70)
+        print(f"Seed {res['seed']} | Top {len(res['top_trials'])}")
+        for i, t in enumerate(res["top_trials"], 1):
+            f1 = t.get("best_f1", None)
+            f2 = t.get("best_f2", None)
+            f3 = t.get("best_f3", None)
+
+            f1s = f"{f1:.4f}" if isinstance(f1, (int, float)) else "NA"
+            f2s = f"{f2:.4f}" if isinstance(f2, (int, float)) else "NA"
+            f3s = f"{f3:.4f}" if isinstance(f3, (int, float)) else "NA"
+
+            print(
+                f"  #{i} | score={t['score']:.6f} | f1={f1s}, f2={f2s}, f3={f3s}\n"
+                f"      params={t['params']}"
+            )
+
+    bp = best_overall["best_params"]
+    score, details = run_nsga2_once(
+        distance_matrix=distance_matrix,
+        time_matrix=time_matrix,
+        seed=best_overall["seed"],
+        pop_size=int(bp["pop_size"]),
+        generations=int(bp["generations"]),
+        crossover_rate=float(bp["crossover_rate"]),
+        base_mutation_rate=float(bp["base_mutation_rate"]),
+        boost_mutation_rate=float(bp["boost_mutation_rate"]),
+        mutation_kind=str(bp["mutation_kind"]),
+        tournament_k=int(bp["tournament_k"]),
+        dup_penalty_step=float(bp["dup_penalty_step"]),
+    )
+
+    print("\n" + "#" * 70)
+    print("EN İYİ PARAMLARLA TEK KOŞU ÖZET")
+    print(f"score: {score:.6f}")
+    print(f"best f1: {details['best_f1']:.4f}")
+    print(f"best f2: {details['best_f2']:.4f}")
+    print(f"best f3: {details['best_f3']:.4f}")
+    print("best chromosome:", details["best_chromosome"])
+
+    routes, total_cost = decode_giant_tour_min_cost_dp(details["best_chromosome"], distance_matrix, capacity=TAXI_CAPACITY)
+    durations = [route_duration(r, time_matrix) for r in routes]
+    max_dur = max(durations) if durations else 0.0
+    avg_dur = (sum(durations) / len(durations)) if durations else 0.0
+
+    print("\nRoutes:")
+    for k, r in enumerate(routes, 1):
+        print(f"  taxi{k}: [0] -> {r} -> [0]   (T={route_duration(r, time_matrix):.2f})")
+    print(f"\nFinal: f1(cost)={total_cost:.2f} | f2(maxT)={max_dur:.2f} | f3(avgT)={avg_dur:.2f}")

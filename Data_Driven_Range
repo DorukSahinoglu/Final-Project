@@ -1,0 +1,298 @@
+import re
+import ast
+import math
+from collections import defaultdict, Counter
+from typing import Dict, Any, List, Tuple, Optional
+
+
+
+MINIMIZE_SCORE = True        
+TOPN_PER_SEED = 3           
+LAMBDA_QUALITY = 0.70     
+CONFIDENCE = 0.80         
+TEMPERATURE = 6.0          
+
+
+RANK_WEIGHTS = {1: 1.0, 2: 1.0, 3: 1.0}
+
+
+NUMERIC_PARAMS = [
+    "pop_size",
+    "generations",
+    "crossover_rate",
+    "base_mutation_rate",
+    "boost_mutation_rate",
+    "dup_penalty_step",
+]
+
+CATEGORICAL_PARAMS = ["mutation_kind"]  
+DISCRETE_PARAMS = ["tournament_k"]     
+
+
+BIN_WIDTH = {
+    "pop_size": 5,
+    "generations": 100,
+    "crossover_rate": 0.01,
+    "base_mutation_rate": 0.025,
+    "boost_mutation_rate": 0.05,
+    "dup_penalty_step": 2.5
+}
+
+
+def parse_seed_top3_log(text: str) -> List[Dict[str, Any]]:
+  
+    rows = []
+    current_seed = None
+    current_rank = None
+    current_score = None
+
+    seed_re = re.compile(r"^\s*Seed\s+(\d+)\s*\|\s*Top\s+(\d+)", re.IGNORECASE)
+    rank_re = re.compile(r"^\s*#(\d+)\s*\|\s*score\s*=\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+    params_re = re.compile(r"^\s*params\s*=\s*(\{.*\})\s*$", re.IGNORECASE)
+
+    for line in text.splitlines():
+        s = seed_re.match(line)
+        if s:
+            current_seed = int(s.group(1))
+            continue
+
+        r = rank_re.match(line)
+        if r and current_seed is not None:
+            current_rank = int(r.group(1))
+            current_score = float(r.group(2))
+            continue
+
+        p = params_re.match(line)
+        if p and current_seed is not None and current_rank is not None and current_score is not None:
+            params_str = p.group(1)
+            try:
+                params = ast.literal_eval(params_str)
+            except Exception:
+                
+                continue
+
+            rows.append({
+                "seed": current_seed,
+                "rank": current_rank,
+                "score": current_score,
+                "params": params
+            })
+
+            
+            current_rank = None
+            current_score = None
+
+    return rows
+
+
+def bin_value(v: float, width: float) -> Tuple[float, float]:
+    
+    if width <= 0:
+        return (v, v)
+    k = math.floor(v / width)
+    lo = k * width
+    hi = lo + width
+    return (lo, hi)
+
+def safe_get(params: Dict[str, Any], k: str) -> Optional[Any]:
+    return params.get(k, None)
+
+def normalize_0_1(values: List[float]) -> List[float]:
+    if not values:
+        return []
+    mn = min(values)
+    mx = max(values)
+    if abs(mx - mn) < 1e-12:
+        return [0.5 for _ in values]
+    return [(v - mn) / (mx - mn) for v in values]
+
+def score_to_goodness(scores: List[float], minimize: bool) -> List[float]:
+   
+    ns = normalize_0_1(scores)
+    if minimize:
+        return [1.0 - x for x in ns]
+    return ns
+
+def softmax(xs: List[float], temp: float) -> List[float]:
+    if not xs:
+        return []
+    t = max(temp, 1e-9)
+    m = max(xs)
+    exps = [math.exp((x - m) * t) for x in xs]
+    s = sum(exps)
+    if s <= 0:
+        return [1.0 / len(xs) for _ in xs]
+    return [e / s for e in exps]
+
+
+
+def recommend_ranges_from_rows(
+    rows: List[Dict[str, Any]],
+    lambda_quality: float,
+    confidence: float,
+    temperature: float,
+) -> Dict[str, Any]:
+    
+    trials = []
+    for r in rows:
+        w = RANK_WEIGHTS.get(r["rank"], 0.5)
+        trials.append({
+            "seed": r["seed"],
+            "rank": r["rank"],
+            "score": r["score"],
+            "w": w,
+            **r["params"],
+        })
+
+   
+    cat_results = {}
+    for p in CATEGORICAL_PARAMS + DISCRETE_PARAMS:
+        c = Counter()
+       
+        scores = [t["score"] for t in trials if p in t]
+        goodness = score_to_goodness(scores, MINIMIZE_SCORE)
+        idx = 0
+        for t in trials:
+            if p not in t:
+                continue
+            g = goodness[idx]
+            idx += 1
+            vote = (0.65 * t["w"] + 0.35 * g) 
+            c[t[p]] += vote
+
+       
+        best = c.most_common(10)
+        cat_results[p] = [{"value": k, "weight": round(v, 4)} for k, v in best]
+
+   
+    num_results = {}
+    for p in NUMERIC_PARAMS:
+        width = float(BIN_WIDTH.get(p, 0.0))
+        
+        bin_scores = defaultdict(list) 
+        bin_weights = defaultdict(float) 
+        bin_values = defaultdict(list)   
+
+        for t in trials:
+            if p not in t:
+                continue
+            v = float(t[p])
+            lo, hi = bin_value(v, width) if width > 0 else (v, v)
+            b = (lo, hi)
+            bin_scores[b].append(float(t["score"]))
+            bin_weights[b] += float(t["w"])
+            bin_values[b].append(v)
+
+        if not bin_scores:
+            continue
+
+        bins = list(bin_scores.keys())
+        
+        mean_scores = [sum(bin_scores[b]) / len(bin_scores[b]) for b in bins]
+        quality_goodness = score_to_goodness(mean_scores, MINIMIZE_SCORE)  
+       
+        freq = [bin_weights[b] for b in bins]
+        freq_norm = normalize_0_1(freq)
+
+        
+        lam = max(0.0, min(1.0, float(lambda_quality)))
+        combined = [lam * q + (1 - lam) * f for q, f in zip(quality_goodness, freq_norm)]
+
+       
+        probs = softmax(combined, temp=temperature)
+
+       
+        order = sorted(range(len(bins)), key=lambda i: probs[i], reverse=True)
+        chosen = []
+        cum = 0.0
+        for i in order:
+            chosen.append(i)
+            cum += probs[i]
+            if cum >= confidence:
+                break
+
+        chosen_bins = [bins[i] for i in chosen]
+        chosen_values = []
+        for b in chosen_bins:
+            chosen_values.extend(bin_values[b])
+
+       
+        lo_val = min(chosen_values)
+        hi_val = max(chosen_values)
+
+        
+        is_intish = all(abs(v - round(v)) < 1e-9 for v in chosen_values)
+        if is_intish:
+            lo_out = int(round(lo_val))
+            hi_out = int(round(hi_val))
+        else:
+            
+            lo_out = round(lo_val, 6)
+            hi_out = round(hi_val, 6)
+
+       
+        top_bins_preview = []
+        for i in order[:5]:
+            b = bins[i]
+            top_bins_preview.append({
+                "bin": [round(b[0], 6), round(b[1], 6)],
+                "p": round(probs[i], 4),
+                "mean_score": round(mean_scores[i], 4),
+                "freq_w": round(freq[i], 4),
+                "combined": round(combined[i], 4),
+            })
+
+        num_results[p] = {
+            "recommended_range": [lo_out, hi_out],
+            "bin_width": width,
+            "confidence_covered": round(cum, 4),
+            "top_bins": top_bins_preview,
+        }
+
+    return {
+        "settings": {
+            "MINIMIZE_SCORE": MINIMIZE_SCORE,
+            "LAMBDA_QUALITY": lambda_quality,
+            "CONFIDENCE": confidence,
+            "TEMPERATURE": temperature,
+            "BIN_WIDTH": BIN_WIDTH,
+        },
+        "categorical_and_discrete": cat_results,
+        "numeric_ranges": num_results,
+    }
+
+
+
+
+if __name__ == "__main__":
+   
+    LOG_TEXT = "a"
+
+    rows = parse_seed_top3_log(LOG_TEXT)
+    if not rows:
+        raise SystemExit("Logdan hiç satır parse edemedim. Formatı kontrol et (params={...} satırı şart).")
+
+    result = recommend_ranges_from_rows(
+        rows,
+        lambda_quality=LAMBDA_QUALITY,
+        confidence=CONFIDENCE,
+        temperature=TEMPERATURE,
+    )
+
+    print("\n=== SETTINGS ===")
+    for k, v in result["settings"].items():
+        print(f"{k}: {v}")
+
+    print("\n=== CATEGORICAL/DISCRETE (aralık yok) ===")
+    for p, best_list in result["categorical_and_discrete"].items():
+        print(f"\n{p}:")
+        for item in best_list:
+            print(f"  - {item['value']}  (weight={item['weight']})")
+
+    print("\n=== NUMERIC PARAMETER RANGES (aralık) ===")
+    for p, info in result["numeric_ranges"].items():
+        rr = info["recommended_range"]
+        print(f"\n{p}: recommended_range = [{rr[0]}, {rr[1]}]  (bin_width={info['bin_width']}, covered≈{info['confidence_covered']})")
+        print("  top_bins preview:")
+        for b in info["top_bins"]:
+            print(f"    bin={b['bin']}  p={b['p']}  mean_score={b['mean_score']}  freq_w={b['freq_w']}  combined={b['combined']}")
