@@ -106,7 +106,7 @@ def normalize_route(route: Route) -> Route:
 
 def clone_routes(routes: Route_matrix) -> Route_matrix:
 
-    return [r[:] for n in routes]
+    return [r[:] for r in routes]
 
 def extract_customers(routes: Route_matrix) -> List[int]:
 
@@ -126,7 +126,7 @@ def route_has_duplicate_customer(route: Route) -> bool:
 
 def build_edge_signature_from_routes(routes: Route_matrix) -> Set[Edge]:
 
-    sig = Set[Edge] = set()
+    sig: Set[Edge] = set()
 
     for route in routes:
         nr = normalize_route(route)
@@ -158,7 +158,7 @@ def max_region_similarity(routes: Route_matrix, closed_regions: List[Set[Edge]])
 
     return best_sim
 
-def evaluate_soution(
+def evaluate_solution(
         problem: HCVRPProblem,
         routes: Route_matrix,
         vehicle_ids: List[int],
@@ -178,7 +178,7 @@ def evaluate_soution(
 
     for route, v_id in zip(normalized_routes, vehicle_ids):
 
-        if v_id < 0 or v_id > len(problem.vehicles):
+        if v_id < 0 or v_id >= len(problem.vehicles):
 
             raise ValueError(f"Gecersiz vehicle id: {v_id}")
         
@@ -245,7 +245,7 @@ def cheapest_feasible_unused_vehicle(
     candidates = []
 
     for v in problem.vehicles:
-        if v.vehicle.id in used_vehicle_ids:
+        if v.vehicle_id in used_vehicle_ids:
 
             continue
 
@@ -257,7 +257,7 @@ def cheapest_feasible_unused_vehicle(
         return None
     
     candidates.sort(key = lambda v: (v.cost_per_km, v.capacity))
-    return candidates[0].vehicle.id
+    return candidates[0].vehicle_id
 
 
 def best_append_position_by_distance(
@@ -370,18 +370,369 @@ def generate_feasible_solution(
                 new_route = [0, customer, 0]
                 routes.append(new_route)
                 vehicle_ids.append(new_vehicle_id)
-                used_vehicle_ids.append(new_vehicle_id)
+                used_vehicle_ids.add(new_vehicle_id)
                 placed = True
 
         if not success:
 
             continue
         
-        state = evaluate_soution(problem, routes, vehicle_ids)
+        state = evaluate_solution(problem, routes, vehicle_ids)
 
         if state.feasible:
 
             return state
     
     raise RuntimeError("Initial feasible solution uretilemedi")
+
+@dataclass
+class Wolf:
+    problem: HCVRPProblem
+    state: SolutionState
+    best_state: SolutionState
+    blood: float = 0.0
+
+    quality_score: float = 0.0
+    best_quality_score: float = 0.0
+
+    delta_history: List[float] = field(default_factory = list)
+
+    @classmethod
+    def create_random(cls, problem: HCVRPProblem) -> "Wolf":
+
+        init_state = generate_feasible_solution(problem)
+        return cls(
+            problem = problem,
+            state = init_state,
+            best_state = init_state,
+            blood = 0.0,
+            quality_score = 0.0,
+            best_quality_score = 0.0,
+            delta_history = []
+        )
+    
+    def clone_state(self, state: SolutionState) -> SolutionState:
+
+        return SolutionState(
+            routes = clone_routes(state.routes),
+            vehicle_ids = state.vehicle_ids[:],
+            route_loads = state.route_loads[:],
+            route_distances = state.route_distances[:],
+            route_costs = state.route_costs[:],
+            total_cost = state.total_cost,
+            feasible = state.feasible
+        )
+    
+    def update_if_better(self, candidate_state: SolutionState):
+
+        if candidate_state.total_cost < self.state.total_cost:
+
+            self.state = self.clone_state(candidate_state)
+
+        if candidate_state.total_cost < self.best_state.total_cost:
+
+            self.best_state = self.clone_state(candidate_state)
+
+
+def initialize_wolves(problem: HCVRPProblem, num_wolves: int) -> List[Wolf]:
+
+    wolves = []
+    for _ in range(num_wolves):
+        wolves.append(Wolf.create_random(problem))
+    return wolves
+
+def minmax_normalize_costs_to_quality(costs: List[float]) -> List[float]:
+
+    if not costs:
+        return []
+    
+    c_min = min(costs)
+    c_max = max(costs)
+
+    if abs(c_max - c_min) < 1e-12:
+
+        return [1.0 for _ in costs]
+    
+    qualities = []
+
+    for c in costs:
+
+        q = (c_max - c) / (c_max - c_min)
+
+        q = max(0.0, min(1.0, q))
+
+        qualities.append(q)
+
+    return qualities
+
+def update_population_quality_scores(wolves: List[Wolf]):
+
+    current_costs = [w.state.total_cost for w in wolves]
+
+    current_qualities = minmax_normalize_costs_to_quality(current_costs)
+
+    for w, q in zip(wolves, current_qualities):
+
+        w.quality_score = q
+    
+    best_costs = [w.best_state.total_cost for w in wolves]
+    best_qualities = minmax_normalize_costs_to_quality(best_costs)
+
+    for w, q in zip(wolves, best_qualities):
+
+        w.best_quality_score = q
+
+def population_cost_stats(wolves: List[Wolf]) -> Tuple[float, float, float]:
+
+    costs = [w.state.total_cost for w in wolves]
+    c_min = min(costs)
+    c_mean = sum(costs) / len(costs)
+    c_max = max(costs)
+    return c_min, c_mean, c_max
+
+def robust_scale_from_history(values: List[float], fallback: float = 1.0) -> float:
+
+    if not values:
+
+        return fallback
+    
+    vals = sorted(abs(v) for v in values)
+
+    m = len(vals)
+
+    if m % 2 == 1:
+        med = vals[m // 2]
+
+    else:
+        med = 0.5 * (vals[m // 2 - 1] + vals[m // 2])
+
+    return max(med, 1e-9)
+
+def register_delta_and_get_scaled_delta(wolf: Wolf, raw_delta: float, max_history: int = 50) -> float:
+
+    wolf.delta_history.append(raw_delta)
+    if len(wolf.delta_history) > max_history:
+
+        wolf.delta_history.pop(0)
+
+    scale = robust_scale_from_history(wolf.delta_history, fallback = 1.0)
+    return raw_delta / scale
+
+
+def clone_solution_state(state: SolutionState) -> SolutionState:
+    return SolutionState(
+        routes = clone_routes(state.routes),
+        vehicle_ids = state.vehicle_ids[:],
+        route_loads = state.route_loads[:],
+        route_distances = state.route_distances[:],
+        route_costs = state.route_costs[:],
+        total_cost = state.total_cost,
+        feasible = state.feasible
+    )
+
+
+def remove_empty_routes(
+        routes: Route_matrix,
+        vehicle_ids: List[int]
+) -> Tuple[Route_matrix, List[int]]:
+    
+    new_routes = []
+    new_vehicle_ids = []
+
+    for route, v_id in zip(routes, vehicle_ids):
+
+        nr = normalize_route(route)
+        if len(route_core(nr)) == 0:
+
+            continue
+
+        new_routes.append(nr)
+        new_vehicle_ids.append(v_id)
+
+    return new_routes, new_vehicle_ids
+
+def random_intra_route_2opt(
+        problem: HCVRPProblem,
+        state: SolutionState
+) -> SolutionState:
+    
+    candidate = clone_solution_state(state)
+    eligible = []
+
+    for r_idx, route in enumerate(candidate.routes):
+
+        core = route_core(route)
+        if len(core) >= 4:
+            eligible.append(r_idx)
+
+    if not eligible:
+        return candidate
+    
+    r_idx = random.choice(eligible)
+    core = route_core(candidate.routes[r_idx])
+
+    i = random.randint(0, len(core) - 2)
+    k = random.randint(i + 1, len(core) - 1)
+
+    new_core = core[:i] + core[i:k + 1][::-1] + core[k + 1:]
+
+    candidate.routes[r_idx] = [0] + new_core + [0]
+
+    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
+
+def random_inter_route_relocate(
+        problem: HCVRPProblem,
+        state: SolutionState
+) -> SolutionState:
+    
+    candidate = clone_solution_state(state)
+
+    non_empty_indices = [
+        i for i, r in enumerate(candidate.routes)
+        if len(route_core(r)) >= 1
+    ]
+
+    if len(non_empty_indices) < 1:
+        return candidate
+    
+    from_idx = random.choice(non_empty_indices)
+
+    possible_to_indices = [i for i in range(len(candidate.routes)) if i != from_idx]
+
+    if not possible_to_indices:
+        return candidate
+    
+    to_idx = random.choice(possible_to_indices)
+
+    from_core = route_core(candidate.routes[from_idx])
+    to_core = route_core(candidate.routes[to_idx])
+
+    if not from_core:
+        return candidate
+    
+    cust_pos = random.randint(0, len(from_core) - 1)
+    customer = from_core.pop(cust_pos)
+
+    insert_pos = random.randint(0, len(to_core))
+    to_core.insert(insert_pos, customer)
+
+    candidate.routes[from_idx] = [0] + from_core + [0]
+    candidate.routes[to_idx] = [0] + to_core + [0]
+
+    candidate.routes, candidate.vehicle_ids =remove_empty_routes(candidate.routes, candidate.vehicle_ids)
+
+    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
+
+def random_inter_route_swap(
+        problem: HCVRPProblem,
+        state: SolutionState
+) -> SolutionState:
+    
+    candidate = clone_solution_state(state)
+
+    eligible = [
+        i for i, r in enumerate(candidate.routes)
+        if len(route_core(r)) >= 1
+    ]
+
+    if len(eligible) < 2:
+        return candidate
+    
+    r1, r2 = random.sample(eligible, 2)
+
+    core1 = route_core(candidate.routes[r1])
+    core2 = route_core(candidate.routes[r2])
+
+    p1 = random.randint(0, len(core1) - 1)
+    p2 = random.randint(0, len(core2) - 1)
+
+    core1[p1], core2[p2] = core2[p2], core1[p1]
+
+    candidate.routes[r1] = [0] + core1 + [0]
+    candidate.routes[r2] = [0] + core2 + [0]
+
+    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
+
+def random_intra_route_reinsert(
+        problem: HCVRPProblem,
+        state: SolutionState
+) -> SolutionState:
+    
+    candidate = clone_solution_state(state)
+
+    eligible = [
+        i for i, r in enumerate(candidate.routes)
+        if len(route_core(r)) >= 3
+    ]
+
+    if not eligible:
+        return candidate
+    
+    r_idx = random.choice(eligible)
+    core = route_core(candidate.routes[r_idx])
+
+    i, j = random.sample(range(len(core)), 2)
+    customer = core.pop(i)
+
+    core.insert(j, customer)
+
+    candidate.routes[r_idx] = [0] + core + [0]
+
+    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
+
+def random_vehicle_reassignment(
+        problem: HCVRPProblem,
+        state: SolutionState
+) -> SolutionState:
+    
+    candidate= clone_solution_state(state)
+
+    if len(candidate.routes) == 0:
+
+        return candidate
+    
+    r_idx = random.randint(0, len(candidate.routes) - 1)
+    current_v_id = candidate.vehicle_ids[r_idx]
+    route = candidate.routes[r_idx]
+    load = problem.route_load(route)
+
+    used = set(candidate.vehicle_ids)
+    unused_vehicles = []
+
+    for v in problem.vehicles:
+
+        if v.vehicle_id in used and v.vehicle_id != current_v_id:
+
+            continue
+
+        if v.capacity >= load and v.vehicle_id != current_v_id:
+
+            unused_vehicles.append(v.vehicle_id)
+
+    if not unused_vehicles:
+            return candidate
+        
+    
+    new_v_id = random.choice(unused_vehicles)
+    candidate.vehicle_ids[r_idx] = new_v_id
+    
+    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
+    
+def propose_random_neighbor(
+        problem: HCVRPProblem,
+        state: SolutionState
+) -> SolutionState:
+    
+    operators = [
+        random_intra_route_2opt,
+        random_inter_route_relocate,
+        random_inter_route_swap,
+        random_intra_route_reinsert,
+        random_vehicle_reassignment
+    ]
+
+    op = random.choice(operators)
+
+    return op(problem, state)
+
 
