@@ -139,7 +139,7 @@ def build_edge_signature_from_routes(routes: Route_matrix) -> Set[Edge]:
     return sig
 
 
-def max_region_similarity(routes: Route_matrix, closed_regions: List[Set[Edge]]) -> float:
+def max_region_similarity_routes(routes: Route_matrix, closed_regions: List[Set[Edge]]) -> float:
 
     if not closed_regions:
         return 0.0
@@ -735,4 +735,635 @@ def propose_random_neighbor(
 
     return op(problem, state)
 
+def select_alpha_index(wolves: List[Wolf]) -> int:
 
+    best_idx = 0
+    best_key = (
+        wolves[0].blood,
+        wolves[0].best_quality_score,
+        -wolves[0].best_state.total_cost
+    )
+
+    for i in range(1, len(wolves)):
+
+        key = (
+            wolves[i].blood,
+            wolves[i].best_quality_score,
+            -wolves[i].best_state.total_cost
+        )
+
+        if key > best_key:
+            best_key = key
+            best_idx = i
+
+    return best_idx
+
+def try_accept_neighbor(
+        wolf: Wolf,
+        candidate_state: SolutionState,
+        closed_regions: Optional[List[Set[Edge]]] = None,
+        lambda_reg: float = 0.0,
+        a: float = 1.5,
+        b: float = 2.0,
+        c: float = 1.0,
+        b_par: float = 1.2,
+        min_improve_gain: float = 0.10,
+        quality_gain_weight: float = 0.50
+        
+) -> bool:
+    
+    old_cost = wolf.state.total_cost
+    new_cost = candidate_state.total_cost
+    raw_delta = new_cost - old_cost
+
+    scaled_delta = register_delta_and_get_scaled_delta(wolf, raw_delta)
+
+    region_pen = 0.0
+    if closed_regions and lambda_reg > 0.0:
+
+            sim = max_region_similarity_routes(candidate_state.routes, closed_regions)
+            region_pen = lambda_reg * sim
+    
+    effective_delta = scaled_delta + region_pen
+
+    if raw_delta <= 0:
+
+        prev_quality = wolf.quality_score
+        wolf.state = wolf.clone_state(candidate_state)
+
+        if candidate_state.total_cost < wolf.best_state.total_cost:
+            wolf.best_state = wolf.clone_state(candidate_state)
+
+        improve_amount = old_cost - new_cost
+
+        standardized_improve = max(0.0, -scaled_delta)
+        blood_gain = min_improve_gain + standardized_improve + quality_gain_weight * prev_quality
+
+        wolf.blood += blood_gain
+
+        return True
+    
+    d = max(0.0, effective_delta)
+    p_allow = math.exp(-a * (d**b))
+
+    if random.random() > p_allow:
+
+        return False
+    
+    penalty = c * (math.exp(b_par * d) - 1.0)
+
+    if wolf.blood >= penalty:
+        wolf.blood -= penalty
+        if wolf.blood < 0.0:
+            wolf.blood = 0.0
+
+        wolf.state = wolf.clone_state(candidate_state)
+        return True
+    return False
+
+def explore_one_step(
+        wolf: Wolf,
+        closed_regions: Optional[List[Set[Edge]]] = None,
+        lambda_reg: float = 0.0,
+        a: float = 1.5,
+        b: float = 2.0,
+        c: float = 1.0,
+        b_par: float = 1.2
+):
+    
+    candidate_state = propose_random_neighbor(wolf.problem, wolf.state)
+
+    try_accept_neighbor(
+        wolf = wolf,
+        candidate_state = candidate_state,
+        closed_regions = closed_regions,
+        a = a,
+        b = b,
+        c = c,
+        b_par = b_par
+    )
+
+def free_search_phase(
+        wolves: List[Wolf],
+        iterations_per_wolf: int = 200,
+        closed_regions: Optional[List[Set[Edge]]] = None,
+        lambda_reg: float = 0.0,
+        a: float = 1.5,
+        b: float = 2.0,
+        c: float = 1.0,
+        b_par: float = 1.2
+):
+    
+    for _ in range(iterations_per_wolf):
+
+        for wolf in wolves:
+
+            explore_one_step(
+                wolf = wolf,
+                closed_regions = closed_regions,
+                lambda_reg = lambda_reg,
+                a = a,
+                b = b,
+                c = c,
+                b_par = b_par
+            )
+
+        update_population_quality_scores(wolves)
+
+def reset_wolves_for_new_hunt(
+        wolves: List[Wolf],
+        reserve_blood: float = 2.0,
+        clear_history: bool = True
+):
+    for wolf in wolves:
+
+        wolf.blood = reserve_blood
+        if clear_history:
+            wolf.delta_history.clear()
+
+def flatten_customers_from_routes(routes: Route_matrix) -> List[int]:
+
+    customers = []
+    for route in routes:
+        for node in route:
+            if node != 0:
+                customers.append(node)
+    return customers
+
+def build_customer_to_route_map(routes: Route_matrix) -> dict[int, int]:
+
+    mapping = {}
+    for r_idx, route in enumerate(routes):
+
+        for node in route:
+
+            if node != 0:
+                mapping[node] = r_idx
+
+    return mapping
+
+def choose_best_insertion_position(
+        problem: HCVRPProblem,
+        route: Route,
+        customer: int
+) -> tuple[int, float]:
+    
+    nr = normalize_route(route)
+    best_pos = 1
+    best_delta = float("inf")
+
+    for i in range(len(nr) - 1):
+
+        a = nr[i]
+        b = nr[i + 1]
+        old_cost = problem.dist[a][b]
+        new_cost = problem.dist[a][customer] + problem.dist[customer][b]
+        delta = new_cost - old_cost
+
+        if delta < best_delta:
+            best_delta = delta
+            best_pos = i + 1
+
+    return best_pos, best_delta
+
+def assign_best_feasible_vehicle_for_tour(
+        problem: HCVRPProblem,
+        route: Route,
+        forbidden_vehicle_ids: Set[int]
+) -> Optional[int]:
+    
+    load = problem.route_load(route)
+    candidates = []
+
+    for v in problem.vehicles:
+
+        if v.vehicle_id in forbidden_vehicle_ids:
+            continue
+        if v.capacity >= load:
+            route_dist = problem.route_distance(route)
+            route_cost = route_dist * v.cost_per_km
+            candidates.append((route_cost, v.capacity, v.vehicle_id))
+
+    if not candidates:
+        
+        return None
+    
+    candidates.sort(key = lambda x: (x[0], x[1]))
+
+    return candidates[0][2]
+
+def remove_customers_from_routes(
+        routes: Route_matrix,
+        customers_to_remove: Set[int]
+) -> Route_matrix:
+    
+    new_routes = []
+    for route in routes:
+        core = [node for node in route if node != 0 and node not in customers_to_remove]
+
+        if core:
+
+            new_routes.append([0] + core + [0])
+
+    return new_routes
+
+def alpha_guided_rebuild(
+        problem: HCVRPProblem,
+        base_state: SolutionState,
+        alpha_state: SolutionState,
+        inherit_frac: float = 0.35
+) -> SolutionState:
+    
+    base_routes = clone_routes(base_state.routes)
+    base_vehicle_ids = base_state.vehicle_ids[:]
+
+    alpha_customers = flatten_customers_from_routes(alpha_state.routes)
+
+    n_customers = len(alpha_customers)
+
+    if n_customers == 0:
+
+        return clone_solution_state(base_state)
+    
+    q = max(1, int(inherit_frac * n_customers))
+
+    selected_customers = set(random.sample(alpha_customers, q))
+
+    reduced_routes = remove_customers_from_routes(base_routes, selected_customers)
+    reduced_vehicle_ids = []
+
+    used_vehicle_ids: Set[int] = set()
+
+    for route in reduced_routes:
+
+        v_id = assign_best_feasible_vehicle_for_tour(problem, route, used_vehicle_ids)
+        if v_id is None:
+            return clone_solution_state(base_state)
+        
+        reduced_vehicle_ids.append(v_id)
+        used_vehicle_ids.add(v_id)
+
+    alpha_map = build_customer_to_route_map(alpha_state.routes)
+
+    grouped: Dict[int, List[int]] = {}
+
+    for c in selected_customers:
+
+        r_idx = alpha_map[c]
+        grouped.setdefault(r_idx, []).append(c)
+    
+    for alpha_r_idx, alpha_route in enumerate(alpha_state.routes):
+        group = grouped.get(alpha_r_idx, [])
+        if not group:
+            continue
+
+        ordered_group = [node for node in alpha_route if node in group]
+
+        for customer in ordered_group:
+
+            best_target = None
+            best_delta = float("inf")
+
+            for r_idx, route in enumerate(reduced_routes):
+
+                vehicle = get_vehicle_by_id(problem, reduced_vehicle_ids[r_idx])
+
+                load = problem.route_load(route)
+
+                if load + problem.demands[customer] > vehicle.capacity:
+
+                    continue
+
+                pos, delta = choose_best_insertion_position(problem, route, customer)
+                if delta < best_delta:
+                    best_delta = delta
+                    best_target = (r_idx, pos)
+
+            if best_target is not None:
+
+                r_idx, pos = best_target
+                nr = normalize_route(reduced_routes[r_idx])
+                nr.insert(pos, customer)
+                reduced_routes[r_idx] = nr
+                continue
+
+            new_route = [0, customer, 0]
+            new_v_id = assign_best_feasible_vehicle_for_tour(problem, new_route, used_vehicle_ids)
+
+            if new_v_id is None:
+
+                return clone_solution_state(base_state)
+            
+            reduced_routes.append(new_route)
+            reduced_vehicle_ids.append(new_v_id)
+            used_vehicle_ids.add(new_v_id)
+
+    return evaluate_solution(problem, reduced_routes, reduced_vehicle_ids)
+
+def ruin_and_rebuild_routes(
+        problem: HCVRPProblem,
+        state: SolutionState,
+        ruin_frac: float = 0.20
+) -> SolutionState:
+    
+    customers = flatten_customers_from_routes(state.routes)
+    n = len(customers)
+
+    if n <= 2:
+        return clone_solution_state(state)
+    
+    q = max(1, int(ruin_frac * n))
+    removed = set(random.sample(customers, q))
+
+    routes = remove_customers_from_routes(state.routes, removed)
+    vehicle_ids: List[int] = []
+    used_vehicle_ids: Set[int] = set()
+
+    for route in routes:
+        v_id = assign_best_feasible_vehicle_for_tour(problem, route, used_vehicle_ids)
+        if v_id is None:
+            return clone_solution_state(state)
+        
+        vehicle_ids.append(v_id)
+        used_vehicle_ids.add(v_id)
+
+    removed_list = list(removed)
+    random.shuffle(removed_list)
+
+    for customer in removed_list:
+        best_target = None
+        best_delta = float("inf")
+
+        for r_idx, route in enumerate(routes):
+
+            vehicle = get_vehicle_by_id(problem, vehicle_ids[r_idx])
+
+            load = problem.route_load(route)
+
+            if load + problem.demands[customer] > vehicle.capacity:
+
+                continue
+
+            pos, delta =choose_best_insertion_position(problem, route, customer)
+
+            if delta < best_delta:
+
+                best_delta = delta
+                best_target = (r_idx, pos)
+        
+        if best_target is not None:
+            r_idx, pos = best_target
+            nr = normalize_route(routes[r_idx])
+            nr.insert(pos, customer)
+            routes[r_idx] = nr
+            continue
+
+        new_route = [0, customer, 0]
+        new_v_id = assign_best_feasible_vehicle_for_tour(problem, new_route, used_vehicle_ids)
+        if new_v_id is None:
+
+            return clone_solution_state(state)
+        
+        routes.append(new_route)
+        vehicle_ids.append(new_v_id)
+        used_vehicle_ids.add(new_v_id)
+    return evaluate_solution(problem, routes, vehicle_ids)
+
+
+
+def hunt_one_wolf_towards_alpha(
+        wolf: Wolf,
+        alpha_state: SolutionState,
+        inherit_frac: float = 0.35,
+        ruin_frac: float = 0.20,
+        rr_repeats: int = 2
+) -> SolutionState:
+    
+    current = alpha_guided_rebuild(
+        problem = wolf.problem,
+        base_state = wolf.state,
+        alpha_state = alpha_state,
+        inherit_frac = inherit_frac
+    )
+
+    best = current
+
+    for _ in range(rr_repeats):
+
+        candidate = ruin_and_rebuild_routes(
+            problem = wolf.problem,
+            state = best,
+            ruin_frac = ruin_frac
+        )
+        if candidate.total_cost < best.total_cost:
+
+            best = candidate
+
+    return best
+
+def hunt_around_alpha(
+        wolves: List[Wolf],
+        alpha_idx: int,
+        inherit_frac: float = 0.35,
+        ruin_frac: float = 0.20,
+        rr_repeats: int = 2
+) -> tuple[SolutionState, float]:
+    
+    alpha = wolves[alpha_idx]
+    alpha_state = alpha.best_state
+
+    hunt_best_state = alpha.clone_state(alpha_state)
+    hunt_best_cost = alpha_state.total_cost
+
+    for i, wolf in enumerate(wolves):
+
+        if i == alpha_idx:
+
+            continue
+        
+        candidate = hunt_one_wolf_towards_alpha(
+            wolf = wolf,
+            alpha_state = alpha_state,
+            inherit_frac = inherit_frac,
+            ruin_frac = ruin_frac,
+            rr_repeats = rr_repeats
+        )
+
+        wolf.update_if_better(candidate)
+
+        if candidate.total_cost < hunt_best_cost:
+
+            hunt_best_state = alpha.clone_state(candidate)
+            hunt_best_cost = candidate.total_cost
+
+    alpha.update_if_better(hunt_best_state)
+
+    update_population_quality_scores(wolves)
+
+    return hunt_best_state, hunt_best_cost
+
+def get_global_best_state(wolves: List[Wolf]) -> SolutionState:
+
+    best = wolves[0].clone_state(wolves[0].best_state)
+    for w in wolves[1:]:
+        
+        if w.best_state.total_cost < best.total_cost:
+
+            best = w.clone_state(w.best_state)
+    
+    return best
+
+def run_bloodhound_hcvrp(
+        problem: HCVRPProblem,
+        num_wolves: int = 12,
+        num_hunts: int = 20,
+        explore_iterations: int = 120,
+        reserve_blood: float = 2.0,
+        lambda_reg: float = 0.30,
+        a: float = 1.5,
+        b: float = 2.0,
+        c: float = 1.0,
+        b_par: float = 1.2,
+        inherit_frac: float = 0.35,
+        ruin_frac: float = 0.20,
+        rr_repeats: int = 2,
+        verbose: bool = True
+) -> SolutionState:
+    
+    wolves = initialize_wolves(problem, num_wolves)
+
+    update_population_quality_scores(wolves)
+
+    global_best = get_global_best_state(wolves)
+
+    closed_regions: List[Set[Edge]] = []
+
+    if verbose:
+
+        print("Initial best cost:", round(global_best.total_cost, 4))
+
+    for hunt_idx in range(num_hunts):
+
+        reset_wolves_for_new_hunt(
+                wolves,
+                reserve_blood = reserve_blood,
+                clear_history = True
+            )
+
+        free_search_phase(
+                wolves = wolves,
+                iterations_per_wolf = explore_iterations,
+                closed_regions = closed_regions,
+                lambda_reg = lambda_reg,
+                a = a,
+                b = b,
+                c = c,
+                b_par = b_par
+            )
+
+        alpha_idx = select_alpha_index(wolves)
+
+        hunt_best_state, hunt_best_cost = hunt_around_alpha(
+                wolves = wolves,
+                alpha_idx = alpha_idx,
+                inherit_frac = inherit_frac,
+                ruin_frac = ruin_frac,
+                rr_repeats = rr_repeats
+            )
+
+        if hunt_best_cost < global_best.total_cost:
+
+                global_best = wolves[alpha_idx].clone_state(hunt_best_state)
+
+        sig = build_edge_signature_from_routes(hunt_best_state.routes)
+        closed_regions.append(sig)
+
+        update_population_quality_scores(wolves)
+
+        if verbose:
+
+                c_min, c_mean, c_max = population_cost_stats(wolves)
+
+                print(
+                f"Hunt {hunt_idx + 1}/{num_hunts} | "
+                f"alpha={alpha_idx} | "
+                f"hunt_best={hunt_best_cost:.4f} | "
+                f"global_best={global_best.total_cost:.4f} | "
+                f"pop_min={c_min:.4f} | "
+                f"pop_mean={c_mean:.4f} | "
+                f"pop_max={c_max:.4f} | "
+                f"closed_regions={len(closed_regions)}"
+
+            )
+    return global_best
+                
+
+# =========================
+# Small test instance
+# =========================
+
+if __name__ == "__main__":
+    coords = [
+        (40, 40),  # depot = 0
+        (22, 22),
+        (36, 26),
+        (21, 45),
+        (45, 35),
+        (55, 20),
+        (33, 34),
+        (50, 50),
+        (55, 45),
+    ]
+
+    demands = [
+        0,   # depot
+        8,
+        6,
+        7,
+        5,
+        9,
+        4,
+        8,
+        6,
+    ]
+
+    vehicles = [
+        Vehicle(vehicle_id=0, capacity=15, cost_per_km=1.00, speed=1.0),
+        Vehicle(vehicle_id=1, capacity=18, cost_per_km=1.15, speed=1.0),
+        Vehicle(vehicle_id=2, capacity=20, cost_per_km=1.30, speed=1.0),
+        Vehicle(vehicle_id=3, capacity=12, cost_per_km=0.90, speed=1.0),
+    ]
+
+    problem = HCVRPProblem(
+        coords=coords,
+        demands=demands,
+        vehicles=vehicles
+    )
+
+    best_state = run_bloodhound_hcvrp(
+        problem=problem,
+        num_wolves=10,
+        num_hunts=15,
+        explore_iterations=80,
+        reserve_blood=2.0,
+        lambda_reg=0.25,
+        a=1.5,
+        b=2.0,
+        c=1.0,
+        b_par=1.2,
+        inherit_frac=0.35,
+        ruin_frac=0.20,
+        rr_repeats=2,
+        verbose=True,
+    )
+
+    print("\n===== FINAL BEST =====")
+    print("Feasible:", best_state.feasible)
+    print("Total cost:", round(best_state.total_cost, 4))
+    print("Vehicle IDs:", best_state.vehicle_ids)
+    print("Route loads:", best_state.route_loads)
+    print("Route distances:", best_state.route_distances)
+    print("Route costs:", best_state.route_costs)
+
+    for i, route in enumerate(best_state.routes):
+        print(f"Route {i}: {route}")
