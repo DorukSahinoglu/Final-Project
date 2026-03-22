@@ -1,0 +1,23 @@
+[
+  {
+    "id": 0,
+    "name": "depo",
+    "address": "Devlet, Süleyman Emin Caddesi 6-7, 06420 Çankaya/Ankara",
+    "lat": 39.9260499,
+    "lon": 32.85803
+  },
+  {
+    "id": 1,
+    "name": "muster1",
+    "address": "Tınaztepe, Başçavuş Sk. No:38, 06660 Çankaya/Ankara",
+    "lat": 39.9156979,
+    "lon": 32.864616
+  },
+  {
+    "id": 2,
+    "name": "muster2",
+    "address": "Hacettepe, Sarıkadı Sk. No:31, 06230 Altındağ/Ankara",
+    "lat": 39.9318665,
+    "lon": 32.8672253
+  }
+]
