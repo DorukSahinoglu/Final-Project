@@ -1,0 +1,277 @@
+import os
+import json
+import math
+import time
+import urllib.parse
+import urllib.request
+
+
+GOOGLE_API_KEY = ""  # buraya Google API key 
+GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOCATIONS_FILE = os.path.join(BASE_DIR, "locations.json")
+DIST_MATRIX_FILE = os.path.join(BASE_DIR, "distance_matrix.json")
+TIME_MATRIX_FILE = os.path.join(BASE_DIR, "time_matrix.json")
+
+
+FALLBACK_AVG_SPEED_KMH = 35.0
+
+
+def load_locations():
+    if not os.path.exists(LOCATIONS_FILE):
+        print(f"❌ {LOCATIONS_FILE} bulunamadı.")
+        return []
+    with open(LOCATIONS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_locations(locations):
+    with open(LOCATIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(locations, f, ensure_ascii=False, indent=2)
+
+
+
+def google_geocode_address(address: str):
+  
+  
+    if not GOOGLE_API_KEY or "BURAYA_" in GOOGLE_API_KEY or GOOGLE_API_KEY.strip() == "":
+        print("❌ GOOGLE_API_KEY girilmemiş.")
+        return None
+
+    candidates = [address.strip()]
+    if "ankara" not in address.lower():
+        candidates.append(address.strip() + ", Ankara, Türkiye")
+
+    for idx, query in enumerate(candidates, start=1):
+        print(f"[DEBUG] Google Geocode deneme {idx}: {query}")
+
+        params = {
+            "address": query,
+            "key": GOOGLE_API_KEY,
+            "region": "tr",
+            
+            "components": "country:TR",
+        }
+        url = GOOGLE_GEOCODE_URL + "?" + urllib.parse.urlencode(params)
+
+        req = urllib.request.Request(url, headers={"User-Agent": "Doruk-VRP-Project/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                raw = response.read().decode("utf-8")
+        except Exception as e:
+            print(f"❌ Google Geocoding isteği başarısız: {e}")
+            continue
+
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            print("❌ Google Geocoding cevabı JSON değil.")
+            continue
+
+        status = obj.get("status")
+        if status != "OK":
+            
+            print(f"→ Google status={status} | error={obj.get('error_message')}")
+            continue
+
+        results = obj.get("results") or []
+        if not results:
+            print("→ Sonuç bulunamadı.")
+            continue
+
+        loc = results[0].get("geometry", {}).get("location", {})
+        lat = loc.get("lat")
+        lng = loc.get("lng")
+
+        if lat is None or lng is None:
+            print("❌ Google lat/lng okunamadı.")
+            continue
+
+        time.sleep(0.2)
+        return float(lat), float(lng)
+
+    return None
+
+
+def geocode_all_missing():
+ 
+    locations = load_locations()
+    if not locations:
+        return []
+
+    any_updated = False
+
+    for loc in locations:
+        if "lat" in loc and "lon" in loc:
+            continue
+
+        print("\n=========================")
+        print(f"ID: {loc.get('id')} | {loc.get('name')}")
+        print(f"Adres: {loc.get('address')}")
+        print("→ Koordinat aranıyor (Google)...")
+
+        result = google_geocode_address(loc.get("address", ""))
+
+        if result is not None:
+            lat, lon = result
+            print(f"Bulunan: {lat:.6f}, {lon:.6f}")
+            confirm = input("Kaydedeyim mi? (E/h): ").strip().lower()
+            if confirm in ("", "e", "evet"):
+                loc["lat"] = lat
+                loc["lon"] = lon
+                any_updated = True
+                print("✔️ Kaydedildi.")
+                continue
+
+        print("⚠️ Otomatik bulunamadı. Manuel gir.")
+        lat_str = input("Latitude (boş=atla): ").strip()
+        lon_str = input("Longitude (boş=atla): ").strip()
+
+        if not lat_str or not lon_str:
+            print("⏭️ Atlandı.")
+            continue
+
+        try:
+            loc["lat"] = float(lat_str.replace(",", "."))
+            loc["lon"] = float(lon_str.replace(",", "."))
+            any_updated = True
+            print("✔️ Manuel kaydedildi.")
+        except ValueError:
+            print("❌ Geçersiz sayı, atlandı.")
+
+    if any_updated:
+        save_locations(locations)
+        print("\n📌 locations.json güncellendi.")
+
+    return locations
+
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = (math.sin(dphi / 2) ** 2 +
+         math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2) ** 2)
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def road_distance_and_time(lat1, lon1, lat2, lon2):
+ 
+    coord_str = f"{lon1},{lat1};{lon2},{lat2}"
+    url = f"https://router.project-osrm.org/route/v1/driving/{coord_str}?overview=false"
+
+    req = urllib.request.Request(url, headers={"User-Agent": "WPO-Router/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            raw = response.read().decode("utf-8")
+    except Exception as e:
+        print(f"OSRM hata: {e}")
+        return None, None
+
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        print("OSRM JSON değil.")
+        return None, None
+
+    if obj.get("code") != "Ok":
+        print(f"OSRM code={obj.get('code')} msg={obj.get('message')}")
+        return None, None
+
+    routes = obj.get("routes") or []
+    if not routes:
+        return None, None
+
+    distance_m = routes[0].get("distance")
+    duration_s = routes[0].get("duration")
+    if distance_m is None:
+        return None, None
+
+    distance_km = distance_m / 1000.0
+    duration_min = None if duration_s is None else (duration_s / 60.0)
+
+    time.sleep(0.2)
+    return distance_km, duration_min
+
+
+def build_distance_and_time_matrices(locations):
+    if not locations:
+        print("❌ Matris için kayıt yok.")
+        return
+
+    missing = [loc for loc in locations if "lat" not in loc or "lon" not in loc]
+    if missing:
+        print("❌ Koordinatı eksik kayıtlar var, önce geocoding tamamlanmalı:")
+        for loc in missing:
+            print(f"- ID {loc.get('id')} | {loc.get('name')} | {loc.get('address')}")
+        return
+
+    n = len(locations)
+    dist_matrix = [[0.0] * n for _ in range(n)]
+    time_matrix = [[0.0] * n for _ in range(n)]
+    id_list = [loc.get("id") for loc in locations]
+
+    print("\n📌 Çalışma dizini:", os.getcwd())
+    print("📌 distance çıktı:", DIST_MATRIX_FILE)
+    print("📌 time çıktı:", TIME_MATRIX_FILE)
+    print(f"\nMesafe + Zaman matrisleri hesaplanıyor... ({n} nokta)")
+
+    for i in range(n):
+        lat1, lon1 = locations[i]["lat"], locations[i]["lon"]
+
+        for j in range(n):
+            if i == j:
+                dist_km, dur_min = 0.0, 0.0
+            else:
+                lat2, lon2 = locations[j]["lat"], locations[j]["lon"]
+                dist_km, dur_min = road_distance_and_time(lat1, lon1, lat2, lon2)
+
+                if dist_km is None:
+                    dist_km = haversine_km(lat1, lon1, lat2, lon2)
+
+                if dur_min is None:
+                    dur_min = (dist_km / FALLBACK_AVG_SPEED_KMH) * 60.0
+
+            dist_matrix[i][j] = round(dist_km, 3)
+            time_matrix[i][j] = round(dur_min, 3)
+
+        print(f"  Satır {i+1}/{n} tamamlandı.")
+
+    dist_output = {"ids": id_list, "distance_matrix": dist_matrix}
+    time_output = {"ids": id_list, "time_matrix_minutes": time_matrix}
+
+    with open(DIST_MATRIX_FILE, "w", encoding="utf-8") as f:
+        json.dump(dist_output, f, ensure_ascii=False, indent=2)
+
+    with open(TIME_MATRIX_FILE, "w", encoding="utf-8") as f:
+        json.dump(time_output, f, ensure_ascii=False, indent=2)
+
+    print("\n✅ KAYIT KONTROL")
+    print("DIST exists?", os.path.exists(DIST_MATRIX_FILE), "size:", os.path.getsize(DIST_MATRIX_FILE))
+    print("TIME exists?", os.path.exists(TIME_MATRIX_FILE), "size:", os.path.getsize(TIME_MATRIX_FILE))
+    print(f"✅ Mesafe matrisi kaydedildi: {DIST_MATRIX_FILE}")
+    print(f"✅ Zaman matrisi kaydedildi: {TIME_MATRIX_FILE}")
+
+
+def main():
+    print("=== Google Geocoding + OSRM Mesafe & Zaman Matrisi ===")
+    print("RUNNING FILE:", os.path.abspath(__file__))
+
+    locations = load_locations()
+    if not locations:
+        return
+
+    locations = geocode_all_missing()
+    if not locations:
+        locations = load_locations()
+        if not locations:
+            return
+
+    build_distance_and_time_matrices(locations)
+
+
+if __name__ == "__main__":
+    main()
