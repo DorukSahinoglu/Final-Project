@@ -14,6 +14,7 @@ class Vehicle:
     vehicle_id: int
     capacity: float
     cost_per_km: float
+    fixed_cost: float = 0.0
     speed: float = 1.0
 
 @dataclass
@@ -22,6 +23,7 @@ class SolutionState:
     vehicle_ids: List[int]
     route_loads: List[float]
     route_distances: List[float]
+    route_times: List[float]
     route_costs: List[float]
     total_cost: float
     feasible: bool
@@ -31,6 +33,8 @@ class HCVRPProblem:
     coords: List[Point]
     demands: List[float]
     vehicles: List[Vehicle]
+    time_windows: Optional[List[Tuple[float, float]]] = None
+    service_times: Optional[List[float]] = None
     dist: Distance_matrix = field(init = False)
     n_nodes: int = field(init = False)
     customer_ids: List[int] = field(init = False)
@@ -52,6 +56,16 @@ class HCVRPProblem:
 
             raise ValueError("En az 1 araç tanımlanmalı")
         
+        if self.time_windows is None:
+            self.time_windows = [(0.0, float("inf")) for _ in range(self.n_nodes)]
+        elif len(self.time_windows) != self.n_nodes:
+            raise ValueError("time_windows uzunlugu node sayisi ile ayni olmali")
+
+        if self.service_times is None:
+            self.service_times = [0.0 for _ in range(self.n_nodes)]
+        elif len(self.service_times) != self.n_nodes:
+            raise ValueError("service_times uzunlugu node sayisi ile ayni olmali")
+
         self.dist = self.build_tsplib_euc2d_matrix(self.coords)
 
     @staticmethod
@@ -78,6 +92,12 @@ class HCVRPProblem:
             total += self.dist[route[i]][route[i + 1]]
         
         return total
+
+    def travel_time(self, from_node: int, to_node: int, vehicle: Vehicle) -> float:
+
+        if vehicle.speed <= 0:
+            raise ValueError("Vehicle speed pozitif olmali")
+        return self.dist[from_node][to_node] / vehicle.speed
     
     def route_load(self, route: Route) -> float:
 
@@ -158,6 +178,38 @@ def max_region_similarity_routes(routes: Route_matrix, closed_regions: List[Set[
 
     return best_sim
 
+def evaluate_route_for_vehicle(
+        problem: HCVRPProblem,
+        route: Route,
+        vehicle: Vehicle
+) -> Tuple[bool, float, float, float, float]:
+
+    nr = normalize_route(route)
+    load = problem.route_load(nr)
+    dist = problem.route_distance(nr)
+    cost = vehicle.fixed_cost + dist * vehicle.cost_per_km
+
+    if load > vehicle.capacity:
+        return False, load, dist, 0.0, cost
+
+    current_time = 0.0
+
+    for i in range(1, len(nr)):
+        prev_node = nr[i - 1]
+        node = nr[i]
+        current_time += problem.travel_time(prev_node, node, vehicle)
+
+        window_open, window_close = problem.time_windows[node]
+        if current_time < window_open:
+            current_time = window_open
+        if current_time > window_close:
+            return False, load, dist, current_time, cost
+
+        if node != 0:
+            current_time += problem.service_times[node]
+
+    return True, load, dist, current_time, cost
+
 def evaluate_solution(
         problem: HCVRPProblem,
         routes: Route_matrix,
@@ -172,6 +224,7 @@ def evaluate_solution(
 
     route_loads: List[float] = []
     route_distances: List[float] = []
+    route_times: List[float] = []
     route_costs: List[float] = []
 
     feasible = True
@@ -188,16 +241,13 @@ def evaluate_solution(
 
             feasible = False
 
-        load = problem.route_load(route)
-        dist = problem.route_distance(route)
-        cost = dist * vehicle.cost_per_km
-
-        if load > vehicle.capacity:
-            
+        route_ok, load, dist, route_time, cost = evaluate_route_for_vehicle(problem, route, vehicle)
+        if not route_ok:
             feasible = False
 
         route_loads.append(load)
         route_distances.append(dist)
+        route_times.append(route_time)
         route_costs.append(cost)
     
     all_customers = extract_customers(normalized_routes)
@@ -213,6 +263,7 @@ def evaluate_solution(
         vehicle_ids = vehicle_ids[:],
         route_loads = route_loads,
         route_distances = route_distances,
+        route_times = route_times,
         route_costs = route_costs,
         total_cost = total_cost,
         feasible = feasible
@@ -234,12 +285,21 @@ def can_append_customer_to_route(
 ) -> bool:
     
     current_load = problem.route_load(normalize_route(route))
-    return current_load + problem.demands[customer] <= vehicle.capacity
+    if current_load + problem.demands[customer] > vehicle.capacity:
+        return False
+
+    nr = normalize_route(route)
+    pos = best_append_position_by_distance(problem, nr, customer)
+    candidate_route = nr[:]
+    candidate_route.insert(pos, customer)
+    route_ok, _, _, _, _ = evaluate_route_for_vehicle(problem, candidate_route, vehicle)
+    return route_ok
 
 def cheapest_feasible_unused_vehicle(
         problem: HCVRPProblem,
         required_load: float,
-        used_vehicle_ids: Set[int]
+        used_vehicle_ids: Set[int],
+        route: Optional[Route] = None
 ) -> Optional[int]:
     
     candidates = []
@@ -251,12 +311,16 @@ def cheapest_feasible_unused_vehicle(
 
         if v.capacity >= required_load:
 
+            if route is not None:
+                route_ok, _, _, _, _ = evaluate_route_for_vehicle(problem, route, v)
+                if not route_ok:
+                    continue
             candidates.append(v)
 
     if not candidates:
         return None
     
-    candidates.sort(key = lambda v: (v.cost_per_km, v.capacity))
+    candidates.sort(key = lambda v: (v.fixed_cost, v.cost_per_km, v.capacity))
     return candidates[0].vehicle_id
 
 
@@ -359,7 +423,8 @@ def generate_feasible_solution(
                 new_vehicle_id = cheapest_feasible_unused_vehicle(
                     problem,
                     required_load = required_load,
-                    used_vehicle_ids = used_vehicle_ids
+                    used_vehicle_ids = used_vehicle_ids,
+                    route = [0, customer, 0]
                 )
 
                 if new_vehicle_id is None:
@@ -418,6 +483,7 @@ class Wolf:
             vehicle_ids = state.vehicle_ids[:],
             route_loads = state.route_loads[:],
             route_distances = state.route_distances[:],
+            route_times = state.route_times[:],
             route_costs = state.route_costs[:],
             total_cost = state.total_cost,
             feasible = state.feasible
@@ -525,6 +591,7 @@ def clone_solution_state(state: SolutionState) -> SolutionState:
         vehicle_ids = state.vehicle_ids[:],
         route_loads = state.route_loads[:],
         route_distances = state.route_distances[:],
+        route_times = state.route_times[:],
         route_costs = state.route_costs[:],
         total_cost = state.total_cost,
         feasible = state.feasible
@@ -940,17 +1007,17 @@ def assign_best_feasible_vehicle_for_tour(
         if v.vehicle_id in forbidden_vehicle_ids:
             continue
         if v.capacity >= load:
-            route_dist = problem.route_distance(route)
-            route_cost = route_dist * v.cost_per_km
-            candidates.append((route_cost, v.capacity, v.vehicle_id))
+            route_ok, _, route_dist, _, route_cost = evaluate_route_for_vehicle(problem, route, v)
+            if route_ok:
+                candidates.append((route_cost, route_dist, v.capacity, v.vehicle_id))
 
     if not candidates:
         
         return None
     
-    candidates.sort(key = lambda x: (x[0], x[1]))
+    candidates.sort(key = lambda x: (x[0], x[1], x[2]))
 
-    return candidates[0][2]
+    return candidates[0][3]
 
 def remove_customers_from_routes(
         routes: Route_matrix,
@@ -1035,6 +1102,11 @@ def alpha_guided_rebuild(
                     continue
 
                 pos, delta = choose_best_insertion_position(problem, route, customer)
+                candidate_route = normalize_route(route)
+                candidate_route.insert(pos, customer)
+                route_ok, _, _, _, _ = evaluate_route_for_vehicle(problem, candidate_route, vehicle)
+                if not route_ok:
+                    continue
                 if delta < best_delta:
                     best_delta = delta
                     best_target = (r_idx, pos)
@@ -1105,6 +1177,11 @@ def ruin_and_rebuild_routes(
                 continue
 
             pos, delta =choose_best_insertion_position(problem, route, customer)
+            candidate_route = normalize_route(route)
+            candidate_route.insert(pos, customer)
+            route_ok, _, _, _, _ = evaluate_route_for_vehicle(problem, candidate_route, vehicle)
+            if not route_ok:
+                continue
 
             if delta < best_delta:
 
@@ -1334,29 +1411,34 @@ if __name__ == "__main__":
     # VEHICLES_SECTION (Kapasite ve Birim Maliyetlere Göre Gruplandırıldı)
     vehicles = [
         # Tip 1 (ID 0-2): Kapasite 130, Maliyet 77
-        *[Vehicle(vehicle_id=i, capacity=130, cost_per_km=1, speed=1.0) for i in range(0, 3)],
+        *[Vehicle(vehicle_id=i, capacity=130, cost_per_km=1, fixed_cost=77, speed=1.0) for i in range(0, 3)],
         # Tip 2 (ID 3-5): Kapasite 141, Maliyet 82
-        *[Vehicle(vehicle_id=i, capacity=141, cost_per_km=1, speed=1.0) for i in range(3, 6)],
+        *[Vehicle(vehicle_id=i, capacity=141, cost_per_km=1, fixed_cost=82, speed=1.0) for i in range(3, 6)],
         # Tip 3 (ID 6-8): Kapasite 154, Maliyet 88
-        *[Vehicle(vehicle_id=i, capacity=154, cost_per_km=1, speed=1.0) for i in range(6, 9)],
+        *[Vehicle(vehicle_id=i, capacity=154, cost_per_km=1, fixed_cost=88, speed=1.0) for i in range(6, 9)],
         # Tip 4 (ID 9-12): Kapasite 168, Maliyet 94
-        *[Vehicle(vehicle_id=i, capacity=168, cost_per_km=1, speed=1.0) for i in range(9, 13)],
+        *[Vehicle(vehicle_id=i, capacity=168, cost_per_km=1, fixed_cost=94, speed=1.0) for i in range(9, 13)],
         # Tip 5 (ID 13-16): Kapasite 183, Maliyet 100
-        *[Vehicle(vehicle_id=i, capacity=183, cost_per_km=1, speed=1.0) for i in range(13, 17)],
+        *[Vehicle(vehicle_id=i, capacity=183, cost_per_km=1, fixed_cost=100, speed=1.0) for i in range(13, 17)],
         # Tip 6 (ID 17-20): Kapasite 200, Maliyet 170
-        *[Vehicle(vehicle_id=i, capacity=200, cost_per_km=1, speed=1.0) for i in range(17, 21)],
+        *[Vehicle(vehicle_id=i, capacity=200, cost_per_km=1, fixed_cost=170, speed=1.0) for i in range(17, 21)],
         # Tip 7 (ID 21-24): Kapasite 218, Maliyet 113
-        *[Vehicle(vehicle_id=i, capacity=218, cost_per_km=1, speed=1.0) for i in range(21, 25)],
+        *[Vehicle(vehicle_id=i, capacity=218, cost_per_km=1, fixed_cost=113, speed=1.0) for i in range(21, 25)],
         # Tip 8 (ID 25-28): Kapasite 238, Maliyet 121
-        *[Vehicle(vehicle_id=i, capacity=238, cost_per_km=1, speed=1.0) for i in range(25, 29)],
+        *[Vehicle(vehicle_id=i, capacity=238, cost_per_km=1, fixed_cost=121, speed=1.0) for i in range(25, 29)],
         # Tip 9 (ID 29-31): Kapasite 259, Maliyet 129
-        *[Vehicle(vehicle_id=i, capacity=259, cost_per_km=1, speed=1.0) for i in range(29, 32)]
+        *[Vehicle(vehicle_id=i, capacity=259, cost_per_km=1, fixed_cost=129, speed=1.0) for i in range(29, 32)]
     ]
+
+    time_windows = [(0.0, float("inf")) for _ in coords]
+    service_times = [0.0 for _ in coords]
 
     problem = HCVRPProblem(
         coords=coords,
         demands=demands,
-        vehicles=vehicles
+        vehicles=vehicles,
+        time_windows=time_windows,
+        service_times=service_times
     )
 
     best_state = run_bloodhound_hcvrp(
@@ -1382,6 +1464,7 @@ if __name__ == "__main__":
     print("Vehicle IDs:", best_state.vehicle_ids)
     print("Route loads:", best_state.route_loads)
     print("Route distances:", best_state.route_distances)
+    print("Route times:", best_state.route_times)
     print("Route costs:", best_state.route_costs)
 
     for i, route in enumerate(best_state.routes):
