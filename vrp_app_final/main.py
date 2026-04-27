@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -10,6 +11,8 @@ import time
 import tkinter as tk
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 from copy import deepcopy
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -57,6 +60,9 @@ GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 FALLBACK_SPEED_KMH = 35.0
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 NSGA_WARNING_CUSTOMER_THRESHOLD = 40
+AUTOSAVE_DIR = os.path.join(os.getenv("APPDATA") or BASE_DIR, "VRP_App_Final")
+AUTOSAVE_PATH = os.path.join(AUTOSAVE_DIR, "autosave_project.json")
+XLSX_NS = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -135,6 +141,72 @@ def osrm_route(lat1: float, lon1: float, lat2: float, lon2: float):
     return round(distance_m / 1000.0, 3), round((duration_s or 0.0) / 60.0, 3)
 
 
+def _excel_col_to_index(cell_ref: str) -> int:
+    letters = "".join(ch for ch in cell_ref if ch.isalpha()).upper()
+    value = 0
+    for ch in letters:
+        value = value * 26 + (ord(ch) - ord("A") + 1)
+    return max(0, value - 1)
+
+
+def _read_xlsx_rows(path: str) -> list[list[str]]:
+    with zipfile.ZipFile(path) as archive:
+        shared_strings: list[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            for item in root.findall("main:si", XLSX_NS):
+                parts = [node.text or "" for node in item.findall(".//main:t", XLSX_NS)]
+                shared_strings.append("".join(parts))
+
+        workbook_root = ET.fromstring(archive.read("xl/workbook.xml"))
+        sheets = workbook_root.findall("main:sheets/main:sheet", XLSX_NS)
+        if not sheets:
+            return []
+        rel_id = sheets[0].attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+
+        rel_root = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        sheet_target = None
+        for rel in rel_root:
+            if rel.attrib.get("Id") == rel_id:
+                sheet_target = rel.attrib.get("Target")
+                break
+        sheet_path = "xl/" + (sheet_target or "worksheets/sheet1.xml").lstrip("/")
+
+        sheet_root = ET.fromstring(archive.read(sheet_path))
+        rows: list[list[str]] = []
+        for row in sheet_root.findall("main:sheetData/main:row", XLSX_NS):
+            values: dict[int, str] = {}
+            max_col = -1
+            for cell in row.findall("main:c", XLSX_NS):
+                ref = cell.attrib.get("r", "")
+                col_idx = _excel_col_to_index(ref)
+                max_col = max(max_col, col_idx)
+                cell_type = cell.attrib.get("t")
+                value_node = cell.find("main:v", XLSX_NS)
+                inline_node = cell.find("main:is/main:t", XLSX_NS)
+                raw_value = value_node.text if value_node is not None else (inline_node.text if inline_node is not None else "")
+                if cell_type == "s" and raw_value:
+                    try:
+                        values[col_idx] = shared_strings[int(raw_value)]
+                    except Exception:
+                        values[col_idx] = raw_value
+                else:
+                    values[col_idx] = raw_value or ""
+            if max_col >= 0:
+                rows.append([values.get(idx, "").strip() for idx in range(max_col + 1)])
+        return rows
+
+
+def _read_table_rows(path: str) -> list[list[str]]:
+    lower = path.lower()
+    if lower.endswith(".csv"):
+        with open(path, encoding="utf-8-sig", newline="") as handle:
+            return [[(cell or "").strip() for cell in row] for row in csv.reader(handle)]
+    if lower.endswith(".xlsx"):
+        return _read_xlsx_rows(path)
+    raise ValueError("Unsupported file type. Please select an .xlsx or .csv file.")
+
+
 class VRPFinalApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -181,7 +253,8 @@ class VRPFinalApp(tk.Tk):
         self._result_warnings = []
 
         self._build_ui()
-        self._refresh_all_views()
+        if not self._load_autosave():
+            self._refresh_all_views()
         self._after_id = self.after(100, self._poll_queue)
 
     def _build_ui(self):
@@ -267,6 +340,7 @@ class VRPFinalApp(tk.Tk):
         self._tab_run = tk.Frame(self._content_host, bg=BG)
         self._tab_matrix = tk.Frame(self._content_host, bg=BG)
         self._tab_results = tk.Frame(self._content_host, bg=BG)
+        self._tab_routeview = tk.Frame(self._content_host, bg=BG)
 
         self._tab_order = [
             ("loc", "Locations", self._tab_loc),
@@ -275,6 +349,7 @@ class VRPFinalApp(tk.Tk):
             ("run", "Run", self._tab_run),
             ("matrix", "Matrices", self._tab_matrix),
             ("results", "Results", self._tab_results),
+            ("routeview", "Route View", self._tab_routeview),
         ]
         self._nav_buttons = {}
         self._active_tab_key = None
@@ -287,6 +362,7 @@ class VRPFinalApp(tk.Tk):
         self._build_run_tab()
         self._build_matrix_tab()
         self._build_results_tab()
+        self._build_route_view_tab()
         self._select_tab("loc")
 
     def _card(self, parent, title: str):
@@ -521,6 +597,7 @@ class VRPFinalApp(tk.Tk):
             ("Load Project", self._load_project),
             ("Save Locations", self._save_locations),
             ("Load Locations", self._load_locations),
+            ("Import from Excel / CSV", self._import_locations_from_sheet),
             ("Load Matrices from JSON", self._load_matrices_from_json),
         ):
             self._make_button(file_card, text, cmd, tone="neutral").pack(fill="x", pady=3)
@@ -659,6 +736,12 @@ class VRPFinalApp(tk.Tk):
             ("Population", "pop_size", "60"),
             ("Generations", "generations", "400"),
             ("Seed", "seed", "0"),
+            ("Crossover", "crossover_rate", "0.90"),
+            ("Base Mutation", "base_mutation", "0.05"),
+            ("Boost Mutation", "boost_mutation", "0.60"),
+            ("Mutation Kind", "mutation_kind", "inversion"),
+            ("Duplicate Pen.", "duplicate_penalty", "12.0"),
+            ("Tournament K", "tournament_k", "2"),
         ):
             row = tk.Frame(nsga_card, bg=PANEL)
             row.pack(fill="x", pady=2)
@@ -672,12 +755,19 @@ class VRPFinalApp(tk.Tk):
         self._bloodhound_card = bloodhound_card.master
         self._bloodhound_entries = {}
         for label, key, default in (
-            ("Wolf", "num_wolves", "12"),
-            ("Hunt", "num_hunts", "20"),
-            ("Explore", "explore_iterations", "120"),
-            ("Reserve", "reserve_blood", "2.0"),
-            ("Inherit", "inherit_frac", "0.35"),
-            ("Ruin", "ruin_frac", "0.20"),
+            ("Wolves", "num_wolves", "12"),
+            ("Hunts", "num_hunts", "20"),
+            ("Explore Iter.", "explore_iterations", "120"),
+            ("Reserve Blood", "reserve_blood", "2.0"),
+            ("Lambda Reg", "lambda_reg", "0.30"),
+            ("Alpha (a)", "a", "1.5"),
+            ("Beta (b)", "b", "2.0"),
+            ("Gamma (c)", "c", "1.0"),
+            ("B Param", "b_par", "1.2"),
+            ("Inherit Frac", "inherit_frac", "0.35"),
+            ("Ruin Frac", "ruin_frac", "0.20"),
+            ("RR Repeats", "rr_repeats", "2"),
+            ("Verbose", "verbose", "true"),
         ):
             row = tk.Frame(bloodhound_card, bg=PANEL)
             row.pack(fill="x", pady=2)
@@ -749,6 +839,18 @@ class VRPFinalApp(tk.Tk):
         self._result_title = tk.Label(top, text="", font=LABEL_FONT, bg=BG, fg=ACCENT2)
         self._result_title.pack(side="right", padx=(8, 0))
         self._make_button(top, "Save Results", self._save_results, tone="neutral").pack(side="right")
+        self._make_button(top, "Open Route View", lambda: self._select_tab("routeview"), tone="accent").pack(side="right", padx=(0, 8))
+
+        self._result_summary = tk.Label(
+            self._tab_results,
+            text="Run a solver to see a structured summary here.",
+            font=LABEL_FONT,
+            bg=BG,
+            fg=TEXT_DIM,
+            justify="left",
+            anchor="w",
+        )
+        self._result_summary.pack(fill="x", padx=12, pady=(0, 8))
 
         columns = ("ID", "Total Cost", "Objectives", "Route Count", "Feasible")
         self._result_tree = ttk.Treeview(self._tab_results, columns=columns, show="headings", height=10, style="dark.Treeview")
@@ -764,10 +866,32 @@ class VRPFinalApp(tk.Tk):
         self._result_warning_text.configure(state="disabled")
         self._result_warning_text.pack(fill="x", padx=12, pady=(0, 8))
 
-        self._section_label(self._tab_results, "Detay", pady=(10, 4))
+        self._section_label(self._tab_results, "Details", pady=(10, 4))
         self._result_detail = self._make_text_area(self._tab_results, height=16, fg="#fbbf24")
         self._result_detail.configure(state="disabled")
         self._result_detail.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+    def _build_route_view_tab(self):
+        top = tk.Frame(self._tab_routeview, bg=BG)
+        top.pack(fill="x", padx=12, pady=(10, 4))
+        tk.Label(top, text="Selected Route View", font=SECTION_FONT, bg=BG, fg=TEXT).pack(side="left")
+        self._route_view_title = tk.Label(top, text="", font=LABEL_FONT, bg=BG, fg=ACCENT2)
+        self._route_view_title.pack(side="right")
+
+        self._route_view_hint = tk.Label(
+            self._tab_routeview,
+            text="Select a solution in Results to inspect all route steps here.",
+            font=LABEL_FONT,
+            bg=BG,
+            fg=TEXT_DIM,
+            justify="left",
+            anchor="w",
+        )
+        self._route_view_hint.pack(fill="x", padx=12, pady=(0, 8))
+
+        self._route_view_text = self._make_text_area(self._tab_routeview, height=28, fg="#fbbf24")
+        self._route_view_text.configure(state="disabled")
+        self._route_view_text.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
     def _refresh_all_views(self):
         self._normalize_locations_and_matrices()
@@ -1007,12 +1131,53 @@ class VRPFinalApp(tk.Tk):
             "bloodhound_params": self._collect_solver_params(SolverKey.BLOODHOUND) if hasattr(self, "_bloodhound_entries") else {},
         }
 
+    def _write_project_file(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(self._project_payload(), handle, ensure_ascii=False, indent=2)
+
+    def _apply_project_data(self, data: dict) -> None:
+        self._locations = data.get("locations", self._locations)
+        self._fleet = data.get("fleet", self._fleet)
+        self._dist_matrix = data.get("distance_matrix", self._dist_matrix)
+        self._time_matrix = data.get("time_matrix", self._time_matrix)
+        self._api_key_var.set(data.get("api_key", ""))
+        if hasattr(self, "_solver_var"):
+            self._solver_var.set(data.get("solver_key", self._solver_var.get()))
+        if hasattr(self, "_nsga_entries"):
+            for key, value in data.get("nsga_params", {}).items():
+                if key in self._nsga_entries:
+                    self._nsga_entries[key].delete(0, "end")
+                    self._nsga_entries[key].insert(0, str(value))
+        if hasattr(self, "_bloodhound_entries"):
+            for key, value in data.get("bloodhound_params", {}).items():
+                if key in self._bloodhound_entries:
+                    self._bloodhound_entries[key].delete(0, "end")
+                    self._bloodhound_entries[key].insert(0, str(value))
+        self._clear_location_form()
+        self._clear_fleet_form()
+        self._refresh_all_views()
+
+    def _save_autosave(self) -> None:
+        self._write_project_file(AUTOSAVE_PATH)
+
+    def _load_autosave(self) -> bool:
+        if not os.path.exists(AUTOSAVE_PATH):
+            return False
+        try:
+            with open(AUTOSAVE_PATH, encoding="utf-8") as handle:
+                data = json.load(handle)
+            self._apply_project_data(data)
+            self._geo_log_write("Autosave restored.")
+            return True
+        except Exception:
+            return False
+
     def _save_project(self):
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], initialfile="vrp_project.json")
         if not path:
             return
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(self._project_payload(), handle, ensure_ascii=False, indent=2)
+        self._write_project_file(path)
         messagebox.showinfo("Saved", path)
 
     def _load_project(self):
@@ -1022,26 +1187,7 @@ class VRPFinalApp(tk.Tk):
         try:
             with open(path, encoding="utf-8") as handle:
                 data = json.load(handle)
-            self._locations = data.get("locations", self._locations)
-            self._fleet = data.get("fleet", self._fleet)
-            self._dist_matrix = data.get("distance_matrix", self._dist_matrix)
-            self._time_matrix = data.get("time_matrix", self._time_matrix)
-            self._api_key_var.set(data.get("api_key", ""))
-            if hasattr(self, "_solver_var"):
-                self._solver_var.set(data.get("solver_key", self._solver_var.get()))
-            if hasattr(self, "_nsga_entries"):
-                for key, value in data.get("nsga_params", {}).items():
-                    if key in self._nsga_entries:
-                        self._nsga_entries[key].delete(0, "end")
-                        self._nsga_entries[key].insert(0, str(value))
-            if hasattr(self, "_bloodhound_entries"):
-                for key, value in data.get("bloodhound_params", {}).items():
-                    if key in self._bloodhound_entries:
-                        self._bloodhound_entries[key].delete(0, "end")
-                        self._bloodhound_entries[key].insert(0, str(value))
-            self._clear_location_form()
-            self._clear_fleet_form()
-            self._refresh_all_views()
+            self._apply_project_data(data)
             self._geo_log_write(f"Project loaded: {path}")
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
@@ -1068,6 +1214,70 @@ class VRPFinalApp(tk.Tk):
             self._geo_log_write(f"Locations loaded: {path}")
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
+
+    def _import_locations_from_sheet(self):
+        path = filedialog.askopenfilename(
+            filetypes=[
+                ("Spreadsheet", "*.xlsx *.csv"),
+                ("Excel Workbook", "*.xlsx"),
+                ("CSV", "*.csv"),
+            ]
+        )
+        if not path:
+            return
+        try:
+            rows = _read_table_rows(path)
+            imported = self._rows_to_location_records(rows)
+            if not imported:
+                messagebox.showwarning("Warning", "No valid customer rows were found in the selected file.")
+                return
+            next_id = max((loc["id"] for loc in self._locations), default=-1) + 1
+            for offset, item in enumerate(imported):
+                item["id"] = next_id + offset
+            self._locations.extend(imported)
+            self._clear_location_form()
+            self._refresh_all_views()
+            self._geo_log_write(f"Imported {len(imported)} customer locations from: {path}")
+            messagebox.showinfo("Imported", f"{len(imported)} customer locations were added.")
+        except Exception as exc:
+            messagebox.showerror("Error", str(exc))
+
+    def _rows_to_location_records(self, rows: list[list[str]]) -> list[dict]:
+        if not rows:
+            return []
+
+        normalized_first = [cell.strip().lower() for cell in rows[0]]
+        has_header = any(cell in {"name", "isim", "customer", "customer name", "address", "adres"} for cell in normalized_first)
+        if has_header:
+            name_idx = next((idx for idx, cell in enumerate(normalized_first) if cell in {"name", "isim", "customer", "customer name"}), 0)
+            addr_idx = next((idx for idx, cell in enumerate(normalized_first) if cell in {"address", "adres", "location address"}), 1 if len(normalized_first) > 1 else 0)
+            data_rows = rows[1:]
+        else:
+            name_idx = 0
+            addr_idx = 1 if len(rows[0]) > 1 else 0
+            data_rows = rows
+
+        imported: list[dict] = []
+        for row in data_rows:
+            if not row:
+                continue
+            name = row[name_idx].strip() if name_idx < len(row) else ""
+            address = row[addr_idx].strip() if addr_idx < len(row) else ""
+            if not name and not address:
+                continue
+            if not name:
+                name = f"Customer {len(imported) + 1}"
+            imported.append(
+                {
+                    "id": 0,
+                    "name": name,
+                    "address": address,
+                    "is_depot": False,
+                    "selected": True,
+                    "demand": 1.0,
+                }
+            )
+        return imported
 
     def _start_geocoding(self):
         if self._geo_running:
@@ -1318,7 +1528,7 @@ class VRPFinalApp(tk.Tk):
             (u["capacity"], u["fixed_cost"], u["cost_per_km"], u["speed_kmh"])
             for u in self._fleet
         }
-        problem_type = "Homojen" if len(signatures) == 1 else "Heterojen"
+        problem_type = "Homogeneous" if len(signatures) == 1 else "Heterogeneous"
         total_units = sum(u["count"] for u in self._fleet)
         self._fleet_summary.configure(text=f"Problem type: {problem_type} | Total vehicles: {total_units}")
 
@@ -1425,7 +1635,9 @@ class VRPFinalApp(tk.Tk):
             advisory = []
             if problem_type == "Heterogeneous":
                 advisory.append("Bloodhound is required for heterogeneous fleets.")
-            elif selected_count > NSGA_WARNING_CUSTOMER_THRESHOLD and hasattr(self, "_solver_var") and self._solver_var.get() == SolverKey.NSGA2.value:
+            else:
+                advisory.append("In homogeneous problems, vehicle count is adjusted by feasibility.")
+            if selected_count > NSGA_WARNING_CUSTOMER_THRESHOLD and hasattr(self, "_solver_var") and self._solver_var.get() == SolverKey.NSGA2.value:
                 advisory.append(
                     f"This problem size may exceed the recommended NSGA-II threshold ({selected_count} customers)."
                 )
@@ -1487,15 +1699,27 @@ class VRPFinalApp(tk.Tk):
                 "pop_size": int(self._nsga_entries["pop_size"].get()),
                 "generations": int(self._nsga_entries["generations"].get()),
                 "seed": int(self._nsga_entries["seed"].get()),
+                "crossover_rate": float(self._nsga_entries["crossover_rate"].get()),
+                "base_mutation": float(self._nsga_entries["base_mutation"].get()),
+                "boost_mutation": float(self._nsga_entries["boost_mutation"].get()),
+                "mutation_kind": self._nsga_entries["mutation_kind"].get().strip() or "inversion",
+                "duplicate_penalty": float(self._nsga_entries["duplicate_penalty"].get()),
+                "tournament_k": int(self._nsga_entries["tournament_k"].get()),
             }
         return {
             "num_wolves": int(self._bloodhound_entries["num_wolves"].get()),
             "num_hunts": int(self._bloodhound_entries["num_hunts"].get()),
             "explore_iterations": int(self._bloodhound_entries["explore_iterations"].get()),
             "reserve_blood": float(self._bloodhound_entries["reserve_blood"].get()),
+            "lambda_reg": float(self._bloodhound_entries["lambda_reg"].get()),
+            "a": float(self._bloodhound_entries["a"].get()),
+            "b": float(self._bloodhound_entries["b"].get()),
+            "c": float(self._bloodhound_entries["c"].get()),
+            "b_par": float(self._bloodhound_entries["b_par"].get()),
             "inherit_frac": float(self._bloodhound_entries["inherit_frac"].get()),
             "ruin_frac": float(self._bloodhound_entries["ruin_frac"].get()),
-            "verbose": False,
+            "rr_repeats": int(self._bloodhound_entries["rr_repeats"].get()),
+            "verbose": self._bloodhound_entries["verbose"].get().strip().lower() in {"1", "true", "yes", "on"},
         }
 
     def _update_solver_choices(self):
@@ -1591,6 +1815,19 @@ class VRPFinalApp(tk.Tk):
                     "Yes" if solution.feasible else "No",
                 ),
             )
+        total_routes = sum(len(solution.routes) for solution in result.solutions)
+        feasible_count = sum(1 for solution in result.solutions if solution.feasible)
+        best_cost = min((solution.total_cost for solution in result.solutions), default=0.0)
+        self._result_summary.configure(
+            text=(
+                f"Solver: {result.solver_key.value.upper()}    "
+                f"Problem: {result.problem_type.value.title()}    "
+                f"Solutions: {len(result.solutions)}\n"
+                f"Feasible solutions: {feasible_count}    "
+                f"Total routes: {total_routes}    "
+                f"Best total cost: {best_cost:.2f}"
+            )
+        )
         self._show_result_warnings()
         if result.solutions:
             self._result_tree.selection_set("1")
@@ -1676,57 +1913,56 @@ class VRPFinalApp(tk.Tk):
         self._result_warning_text.insert("end", "\n".join(lines))
         self._result_warning_text.configure(state="disabled")
 
-    def _show_result_warnings(self):
-        lines = self._result_warnings[:]
-        if not lines and self._last_solver_result:
-            if self._last_solver_result.solver_key is SolverKey.NSGA2:
-                customer_count = sum(1 for loc in self._locations if not loc.get("is_depot") and loc.get("selected"))
-                if customer_count > NSGA_WARNING_CUSTOMER_THRESHOLD:
-                    lines.append(
-                        f"NSGA-II ran with {customer_count} selected customers. Bloodhound may be more stable."
-                    )
-        if not lines:
-            lines = ["No warnings."]
-        self._result_warning_text.configure(state="normal")
-        self._result_warning_text.delete("1.0", "end")
-        self._result_warning_text.insert("end", "\n".join(lines))
-        self._result_warning_text.configure(state="disabled")
-
     def _show_selected_solution(self, _event=None):
         selection = self._result_tree.selection()
         if not selection:
             return
         solution = self._result_solutions[int(selection[0]) - 1]
+        location_names = {loc["id"]: loc.get("name", f"Node {loc['id']}") for loc in self._locations}
         total_fixed = sum((route.fixed_cost or 0.0) for route in solution.routes)
         total_variable = sum((route.variable_cost or 0.0) for route in solution.routes)
         total_distance = sum((route.route_distance or 0.0) for route in solution.routes)
         total_time = sum((route.route_time or 0.0) for route in solution.routes)
         lines = [
             f"Solution ID: {solution.solution_id}",
+            f"Feasible: {'Yes' if solution.feasible else 'No'}",
+            "",
+            "Summary",
             f"Total Cost: {solution.total_cost:.2f}",
-            f"Feasible: {solution.feasible}",
             f"Total Fixed Cost: {total_fixed:.2f}",
             f"Total Variable Cost: {total_variable:.2f}",
             f"Total Distance: {total_distance:.2f}",
             f"Total Time: {total_time:.2f}",
-            "Objectives:",
+            f"Route Count: {len(solution.routes)}",
+            "",
+            "Objectives",
         ]
         for key, value in solution.objectives.items():
-            lines.append(f"  - {key}: {value:.2f}")
+            label = key.replace("_", " ").title()
+            lines.append(f"- {label}: {value:.2f}")
         lines.append("")
-        lines.append("Routes:")
+        lines.append("Routes")
         for idx, route in enumerate(solution.routes, start=1):
-            node_text = " -> ".join(str(node) for node in route.nodes)
-            lines.append(
-                f"  {idx}. {route.vehicle_label or '-'} | [{node_text}] | "
-                f"dist={route.route_distance or 0:.2f} | time={route.route_time or 0:.2f} | "
-                f"fixed={route.fixed_cost or 0:.2f} | variable={route.variable_cost or 0:.2f} | "
-                f"cost={route.route_cost or 0:.2f}"
+            named_nodes = [location_names.get(node, str(node)) for node in route.nodes]
+            stop_text = " -> ".join(named_nodes) if named_nodes else "No assigned customers"
+            lines.extend(
+                [
+                    f"{idx}. Vehicle: {route.vehicle_label or '-'}",
+                    f"Stops: Depot -> {stop_text} -> Depot",
+                    f"Distance: {route.route_distance or 0:.2f} | Time: {route.route_time or 0:.2f} | Cost: {route.route_cost or 0:.2f}",
+                    f"Fixed Cost: {route.fixed_cost or 0:.2f} | Variable Cost: {route.variable_cost or 0:.2f}",
+                    "",
+                ]
             )
         self._result_detail.configure(state="normal")
         self._result_detail.delete("1.0", "end")
         self._result_detail.insert("end", "\n".join(lines))
         self._result_detail.configure(state="disabled")
+        self._route_view_title.configure(text=solution.solution_id)
+        self._route_view_text.configure(state="normal")
+        self._route_view_text.delete("1.0", "end")
+        self._route_view_text.insert("end", "\n".join(lines))
+        self._route_view_text.configure(state="disabled")
 
     def _poll_queue(self):
         try:
@@ -1761,6 +1997,14 @@ class VRPFinalApp(tk.Tk):
                         self._run_log_write(
                             f"Gen {generation} | rank1={payload.get('rank1_count')} | best={payload.get('best_cost'):.2f}"
                         )
+                    elif payload.get("phase") == "bloodhound_log":
+                        message = payload.get("message", "")
+                        self._run_log_write(message)
+                        if payload.get("current_hunt") and payload.get("total_hunts"):
+                            current = int(payload["current_hunt"])
+                            total = max(1, int(payload["total_hunts"]))
+                            self._prog_var.set(min(100.0, current / total * 100.0))
+                            self._prog_lbl.configure(text=f"Hunt {current}/{total}")
                     else:
                         self._prog_lbl.configure(text="Preparing...")
                         self._run_log_write(f"Progress: {payload}")
@@ -1792,6 +2036,10 @@ class VRPFinalApp(tk.Tk):
 
     def on_close(self):
         self._geo_stop[0] = True
+        try:
+            self._save_autosave()
+        except Exception:
+            pass
         if self._after_id is not None:
             self.after_cancel(self._after_id)
         self.destroy()

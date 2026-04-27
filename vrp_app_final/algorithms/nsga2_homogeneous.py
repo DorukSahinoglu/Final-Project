@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import time
 from dataclasses import dataclass, field
 
 
@@ -247,9 +248,9 @@ def tournament_pick(population: list[Individual], rng: random.Random, k: int = 2
     return best
 
 
-def build_mating_pool(population: list[Individual], pool_size: int, seed: int) -> list[Individual]:
+def build_mating_pool(population: list[Individual], pool_size: int, seed: int, tournament_k: int = 2) -> list[Individual]:
     rng = random.Random(seed)
-    return [tournament_pick(population, rng, k=2) for _ in range(pool_size)]
+    return [tournament_pick(population, rng, k=tournament_k) for _ in range(pool_size)]
 
 
 def apply_duplicate_penalty(population: list[Individual], penalty_step: float = 10.0) -> None:
@@ -380,6 +381,12 @@ def run_nsga2_homogeneous(
     pop_size: int,
     generations: int,
     seed: int,
+    crossover_rate: float = 0.90,
+    base_mutation: float = 0.05,
+    boost_mutation: float = 0.60,
+    mutation_kind: str = "inversion",
+    duplicate_penalty: float = 12.0,
+    tournament_k: int = 2,
     callback=None,
     stop_flag: list[bool] | None = None,
 ) -> list[dict]:
@@ -396,14 +403,14 @@ def run_nsga2_homogeneous(
         fixed_cost,
         cost_per_km,
     )
-    apply_duplicate_penalty(population, penalty_step=12.0)
-
-    base_mutation = 0.05
-    boost_mutation = 0.60
+    apply_duplicate_penalty(population, penalty_step=duplicate_penalty)
 
     for generation in range(generations):
         if stop_flag and stop_flag[0]:
             break
+
+        if generation % 5 == 0:
+            time.sleep(0.001)
 
         prepare_rank_and_crowding(population)
         mutation_rate = base_mutation
@@ -414,13 +421,14 @@ def run_nsga2_homogeneous(
             population,
             pool_size=pop_size,
             seed=seed + 2000 + generation,
+            tournament_k=tournament_k,
         )
         offspring = make_offspring(
             parents=mating_pool,
             rng=rng,
-            crossover_rate=0.90,
+            crossover_rate=crossover_rate,
             mutation_rate=mutation_rate,
-            mutation_kind="inversion",
+            mutation_kind=mutation_kind,
         )
         evaluate_population_vrp(
             offspring,
@@ -431,10 +439,10 @@ def run_nsga2_homogeneous(
             fixed_cost,
             cost_per_km,
         )
-        apply_duplicate_penalty(offspring, penalty_step=12.0)
+        apply_duplicate_penalty(offspring, penalty_step=duplicate_penalty)
         population = environmental_selection_elitist(population, offspring, pop_size)
 
-        if callback:
+        if callback and ((generation + 1) % 5 == 0 or generation + 1 == generations):
             rank1_count = sum(1 for individual in population if individual.rank == 1)
             best_cost = min(
                 individual.f1_total_cost

@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+import contextlib
 import math
+import re
+import sys
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 from ..schemas import FleetUnit, LocationRecord
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+def _resolve_root_dir() -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    return Path(__file__).resolve().parents[2]
+
+
+ROOT_DIR = _resolve_root_dir()
 BLOODHOUND_SOURCE = ROOT_DIR / "research" / "algorithms" / "Bloodhound_Optimizer_VRP"
 
 _LEGACY_BLOODHOUND = None
+HUNT_LINE_RE = re.compile(
+    r"Hunt\s+(?P<current>\d+)/(?P<total>\d+)\s+\|\s+alpha=(?P<alpha>\d+)\s+\|\s+"
+    r"hunt_best=(?P<hunt_best>[-+]?\d*\.?\d+)\s+\|\s+global_best=(?P<global_best>[-+]?\d*\.?\d+)"
+)
 
 
 def load_legacy_bloodhound():
@@ -21,6 +34,43 @@ def load_legacy_bloodhound():
             str(BLOODHOUND_SOURCE),
         ).load_module()
     return _LEGACY_BLOODHOUND
+
+
+class _ProgressWriter:
+    def __init__(self, progress_callback=None) -> None:
+        self._progress_callback = progress_callback
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._emit(line.strip())
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer.strip():
+            self._emit(self._buffer.strip())
+        self._buffer = ""
+
+    def _emit(self, line: str) -> None:
+        if not line or self._progress_callback is None:
+            return
+        payload = {"phase": "bloodhound_log", "message": line}
+        match = HUNT_LINE_RE.search(line)
+        if match:
+            payload.update(
+                {
+                    "current_hunt": int(match.group("current")),
+                    "total_hunts": int(match.group("total")),
+                    "alpha_index": int(match.group("alpha")),
+                    "hunt_best": float(match.group("hunt_best")),
+                    "global_best": float(match.group("global_best")),
+                }
+            )
+        self._progress_callback(payload)
 
 
 class MatrixBackedHCVRPProblem:
@@ -130,6 +180,7 @@ def run_bloodhound_with_matrices(
     time_windows: list[tuple[float, float]] | None = None,
     service_times: list[float] | None = None,
     solver_params: dict | None = None,
+    progress_callback=None,
 ):
     legacy = load_legacy_bloodhound()
     vehicles = expand_fleet_units(fleet)
@@ -156,8 +207,17 @@ def run_bloodhound_with_matrices(
         "inherit_frac": 0.35,
         "ruin_frac": 0.20,
         "rr_repeats": 2,
-        "verbose": False,
+        "verbose": True,
     }
     if solver_params:
         params.update(solver_params)
-    return legacy.run_bloodhound_hcvrp(problem=problem, **params)
+    if progress_callback is not None:
+        params["verbose"] = True
+    if progress_callback is None:
+        return legacy.run_bloodhound_hcvrp(problem=problem, **params)
+
+    writer = _ProgressWriter(progress_callback=progress_callback)
+    with contextlib.redirect_stdout(writer):
+        result = legacy.run_bloodhound_hcvrp(problem=problem, **params)
+    writer.flush()
+    return result
