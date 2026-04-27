@@ -62,6 +62,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 NSGA_WARNING_CUSTOMER_THRESHOLD = 40
 AUTOSAVE_DIR = os.path.join(os.getenv("APPDATA") or BASE_DIR, "VRP_App_Final")
 AUTOSAVE_PATH = os.path.join(AUTOSAVE_DIR, "autosave_project.json")
+RUNTIME_DATA_DIR = AUTOSAVE_DIR
 XLSX_NS = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
 
@@ -1359,12 +1360,17 @@ class VRPFinalApp(tk.Tk):
                 done += 1
             self._queue.put(("geo_log", f"Matrix row {i + 1}/{n} completed (%{int(done / total * 100)})"))
 
-        with open(os.path.join(BASE_DIR, "distance_matrix.json"), "w", encoding="utf-8") as handle:
+        os.makedirs(RUNTIME_DATA_DIR, exist_ok=True)
+        distance_path = os.path.join(RUNTIME_DATA_DIR, "distance_matrix.json")
+        time_path = os.path.join(RUNTIME_DATA_DIR, "time_matrix.json")
+        with open(distance_path, "w", encoding="utf-8") as handle:
             json.dump({"distance_matrix": dist}, handle, ensure_ascii=False, indent=2)
-        with open(os.path.join(BASE_DIR, "time_matrix.json"), "w", encoding="utf-8") as handle:
+        with open(time_path, "w", encoding="utf-8") as handle:
             json.dump({"time_matrix": time_matrix}, handle, ensure_ascii=False, indent=2)
 
         self._queue.put(("matrix_ready", dist, time_matrix))
+        self._queue.put(("geo_log", f"Distance matrix saved: {distance_path}"))
+        self._queue.put(("geo_log", f"Time matrix saved: {time_path}"))
         self._queue.put(("geo_done", "matrix"))
 
     def _stop_geo(self):
