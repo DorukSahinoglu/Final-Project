@@ -130,6 +130,12 @@ class NSGA2Adapter(SolverAdapter):
             pop_size=int(config.get("pop_size", 60)),
             generations=int(config.get("generations", 500)),
             seed=int(config.get("seed", 0)),
+            crossover_rate=float(config.get("crossover_rate", 0.90)),
+            base_mutation=float(config.get("base_mutation", 0.05)),
+            boost_mutation=float(config.get("boost_mutation", 0.60)),
+            mutation_kind=str(config.get("mutation_kind", "inversion")),
+            duplicate_penalty=float(config.get("duplicate_penalty", 12.0)),
+            tournament_k=int(config.get("tournament_k", 2)),
             callback=callback,
             stop_flag=stop_flag,
         )
@@ -185,6 +191,12 @@ class NSGA2Adapter(SolverAdapter):
                 "population_size": int(config.get("pop_size", 60)),
                 "generations": int(config.get("generations", 500)),
                 "seed": int(config.get("seed", 0)),
+                "crossover_rate": float(config.get("crossover_rate", 0.90)),
+                "base_mutation": float(config.get("base_mutation", 0.05)),
+                "boost_mutation": float(config.get("boost_mutation", 0.60)),
+                "mutation_kind": str(config.get("mutation_kind", "inversion")),
+                "duplicate_penalty": float(config.get("duplicate_penalty", 12.0)),
+                "tournament_k": int(config.get("tournament_k", 2)),
             },
         )
 
@@ -230,6 +242,7 @@ class BloodhoundAdapter(SolverAdapter):
             time_windows=time_windows,
             service_times=service_times,
             solver_params=config,
+            progress_callback=progress_callback,
         )
 
         expanded_units = []
