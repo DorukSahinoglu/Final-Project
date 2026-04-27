@@ -5,7 +5,7 @@ a = Analysis(
     ['vrp_app_final\\main.py'],
     pathex=['C:\\Users\\doruk\\Desktop\\Final-Project'],
     binaries=[],
-    datas=[],
+    datas=[('research\\algorithms\\Bloodhound_Optimizer_VRP', 'research\\algorithms')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

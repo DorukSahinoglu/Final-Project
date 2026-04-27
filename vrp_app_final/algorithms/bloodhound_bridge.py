@@ -3,13 +3,20 @@ from __future__ import annotations
 import contextlib
 import math
 import re
+import sys
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 from ..schemas import FleetUnit, LocationRecord
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+def _resolve_root_dir() -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    return Path(__file__).resolve().parents[2]
+
+
+ROOT_DIR = _resolve_root_dir()
 BLOODHOUND_SOURCE = ROOT_DIR / "research" / "algorithms" / "Bloodhound_Optimizer_VRP"
 
 _LEGACY_BLOODHOUND = None
