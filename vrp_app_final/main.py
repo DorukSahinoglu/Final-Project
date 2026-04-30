@@ -759,6 +759,7 @@ class VRPFinalApp(tk.Tk):
             ("Wolves", "num_wolves", "12"),
             ("Hunts", "num_hunts", "20"),
             ("Explore Iter.", "explore_iterations", "120"),
+            ("Max Route Min", "max_route_time_min", ""),
             ("Reserve Blood", "reserve_blood", "2.0"),
             ("Lambda Reg", "lambda_reg", "0.30"),
             ("Alpha (a)", "a", "1.5"),
@@ -1149,12 +1150,12 @@ class VRPFinalApp(tk.Tk):
             for key, value in data.get("nsga_params", {}).items():
                 if key in self._nsga_entries:
                     self._nsga_entries[key].delete(0, "end")
-                    self._nsga_entries[key].insert(0, str(value))
+                    self._nsga_entries[key].insert(0, "" if value is None else str(value))
         if hasattr(self, "_bloodhound_entries"):
             for key, value in data.get("bloodhound_params", {}).items():
                 if key in self._bloodhound_entries:
                     self._bloodhound_entries[key].delete(0, "end")
-                    self._bloodhound_entries[key].insert(0, str(value))
+                    self._bloodhound_entries[key].insert(0, "" if value is None else str(value))
         self._clear_location_form()
         self._clear_fleet_form()
         self._refresh_all_views()
@@ -1531,7 +1532,7 @@ class VRPFinalApp(tk.Tk):
                 ),
             )
         signatures = {
-            (u["capacity"], u["fixed_cost"], u["cost_per_km"], u["speed_kmh"])
+            (u["capacity"], u["fixed_cost"], u["cost_per_km"])
             for u in self._fleet
         }
         problem_type = "Homogeneous" if len(signatures) == 1 else "Heterogeneous"
@@ -1624,7 +1625,7 @@ class VRPFinalApp(tk.Tk):
         total_locations = len(self._locations)
         total_units = sum(unit["count"] for unit in self._fleet)
         signatures = {
-            (u["capacity"], u["fixed_cost"], u["cost_per_km"], u["speed_kmh"])
+            (u["capacity"], u["fixed_cost"], u["cost_per_km"])
             for u in self._fleet
         }
         problem_type = "Homogeneous" if len(signatures) == 1 else "Heterogeneous"
@@ -1712,10 +1713,12 @@ class VRPFinalApp(tk.Tk):
                 "duplicate_penalty": float(self._nsga_entries["duplicate_penalty"].get()),
                 "tournament_k": int(self._nsga_entries["tournament_k"].get()),
             }
+        max_route_text = self._bloodhound_entries["max_route_time_min"].get().strip()
         return {
             "num_wolves": int(self._bloodhound_entries["num_wolves"].get()),
             "num_hunts": int(self._bloodhound_entries["num_hunts"].get()),
             "explore_iterations": int(self._bloodhound_entries["explore_iterations"].get()),
+            "max_route_time_min": float(max_route_text) if max_route_text else None,
             "reserve_blood": float(self._bloodhound_entries["reserve_blood"].get()),
             "lambda_reg": float(self._bloodhound_entries["lambda_reg"].get()),
             "a": float(self._bloodhound_entries["a"].get()),

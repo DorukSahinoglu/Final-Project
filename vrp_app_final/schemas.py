@@ -81,7 +81,6 @@ class VRPProblemData:
                 unit.capacity,
                 unit.fixed_cost,
                 unit.cost_per_km,
-                unit.speed_kmh,
             )
             for unit in self.fleet
         }
