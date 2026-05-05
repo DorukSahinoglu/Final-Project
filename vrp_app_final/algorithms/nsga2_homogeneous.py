@@ -16,7 +16,6 @@ def route_distance(route: Route, dist: list[list[float]]) -> float:
     total = dist[DEPOT][route[0]]
     for i in range(len(route) - 1):
         total += dist[route[i]][route[i + 1]]
-    total += dist[route[-1]][DEPOT]
     return total
 
 
@@ -26,7 +25,6 @@ def route_duration(route: Route, time_matrix: list[list[float]]) -> float:
     total = time_matrix[DEPOT][route[0]]
     for i in range(len(route) - 1):
         total += time_matrix[route[i]][route[i + 1]]
-    total += time_matrix[route[-1]][DEPOT]
     return total
 
 

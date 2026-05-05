@@ -83,12 +83,14 @@ class MatrixBackedHCVRPProblem:
         service_times: list[float] | None = None,
         distance_matrix: list[list[float]] | None = None,
         time_matrix: list[list[float]] | None = None,
+        max_route_time_min: float | None = None,
     ) -> None:
         self.coords = coords
         self.demands = demands
         self.vehicles = vehicles
         self.time_windows = time_windows or [(0.0, float("inf")) for _ in coords]
         self.service_times = service_times or [0.0 for _ in coords]
+        self.max_route_time_min = max_route_time_min
         self.n_nodes = len(coords)
         self.customer_ids = list(range(1, self.n_nodes))
 
@@ -119,7 +121,10 @@ class MatrixBackedHCVRPProblem:
 
     def route_distance(self, route: list[int]) -> float:
         total = 0.0
-        for i in range(len(route) - 1):
+        edge_count = len(route) - 1
+        if len(route) >= 2 and route[-1] == 0:
+            edge_count -= 1
+        for i in range(edge_count):
             total += self.dist[route[i]][route[i + 1]]
         return total
 
@@ -185,15 +190,6 @@ def run_bloodhound_with_matrices(
     legacy = load_legacy_bloodhound()
     vehicles = expand_fleet_units(fleet)
     coords = build_coords(locations)
-    problem = MatrixBackedHCVRPProblem(
-        coords=coords,
-        demands=demands,
-        vehicles=vehicles,
-        time_windows=time_windows,
-        service_times=service_times,
-        distance_matrix=distance_matrix,
-        time_matrix=time_matrix,
-    )
     params = {
         "num_wolves": 12,
         "num_hunts": 20,
@@ -211,6 +207,17 @@ def run_bloodhound_with_matrices(
     }
     if solver_params:
         params.update(solver_params)
+    max_route_time_min = params.pop("max_route_time_min", None)
+    problem = MatrixBackedHCVRPProblem(
+        coords=coords,
+        demands=demands,
+        vehicles=vehicles,
+        time_windows=time_windows,
+        service_times=service_times,
+        distance_matrix=distance_matrix,
+        time_matrix=time_matrix,
+        max_route_time_min=max_route_time_min,
+    )
     if progress_callback is not None:
         params["verbose"] = True
     if progress_callback is None:
