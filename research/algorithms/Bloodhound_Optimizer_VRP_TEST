@@ -119,19 +119,138 @@ class HCVRPProblem:
         seen_sorted = sorted(seen)
         return seen_sorted == self.customer_ids
 
+def tsplib_distance_from_coords(a: Point, b: Point, edge_weight_type: str) -> float:
+
+    x1, y1 = a
+    x2, y2 = b
+    dx = x1 - x2
+    dy = y1 - y2
+
+    if edge_weight_type == "EUC_2D":
+        return int(math.sqrt(dx * dx + dy * dy) + 0.5)
+    if edge_weight_type == "CEIL_2D":
+        return math.ceil(math.sqrt(dx * dx + dy * dy))
+    if edge_weight_type == "FLOOR_2D":
+        return math.floor(math.sqrt(dx * dx + dy * dy))
+    if edge_weight_type == "MAN_2D":
+        return abs(dx) + abs(dy)
+    if edge_weight_type == "MAX_2D":
+        return max(abs(dx), abs(dy))
+
+    raise ValueError(f"Desteklenmeyen koordinat tabanli EDGE_WEIGHT_TYPE: {edge_weight_type}")
+
+def build_distance_matrix_from_coords(
+        coords: List[Point],
+        edge_weight_type: str
+) -> Distance_matrix:
+
+    n = len(coords)
+    dist = [[0.0] * n for _ in range(n)]
+
+    for i in range(n):
+        for j in range(n):
+            dist[i][j] = tsplib_distance_from_coords(coords[i], coords[j], edge_weight_type)
+
+    return dist
+
+def parse_explicit_edge_weight_matrix(
+        flat_values: List[float],
+        dimension: int,
+        edge_weight_format: str
+) -> Distance_matrix:
+
+    fmt = edge_weight_format.upper()
+    dist = [[0.0] * dimension for _ in range(dimension)]
+    idx = 0
+
+    def take() -> float:
+        nonlocal idx
+        if idx >= len(flat_values):
+            raise ValueError("EDGE_WEIGHT_SECTION beklenenden kisa")
+        value = flat_values[idx]
+        idx += 1
+        return value
+
+    if fmt == "FULL_MATRIX":
+        for i in range(dimension):
+            for j in range(dimension):
+                dist[i][j] = take()
+    elif fmt == "UPPER_ROW":
+        for i in range(dimension):
+            for j in range(i + 1, dimension):
+                value = take()
+                dist[i][j] = value
+                dist[j][i] = value
+    elif fmt == "LOWER_ROW":
+        for i in range(dimension):
+            for j in range(0, i):
+                value = take()
+                dist[i][j] = value
+                dist[j][i] = value
+    elif fmt == "UPPER_DIAG_ROW":
+        for i in range(dimension):
+            for j in range(i, dimension):
+                value = take()
+                dist[i][j] = value
+                dist[j][i] = value
+    elif fmt == "LOWER_DIAG_ROW":
+        for i in range(dimension):
+            for j in range(0, i + 1):
+                value = take()
+                dist[i][j] = value
+                dist[j][i] = value
+    elif fmt == "UPPER_COL":
+        for j in range(dimension):
+            for i in range(0, j):
+                value = take()
+                dist[i][j] = value
+                dist[j][i] = value
+    elif fmt == "LOWER_COL":
+        for j in range(dimension):
+            for i in range(j + 1, dimension):
+                value = take()
+                dist[i][j] = value
+                dist[j][i] = value
+    elif fmt == "UPPER_DIAG_COL":
+        for j in range(dimension):
+            for i in range(0, j + 1):
+                value = take()
+                dist[i][j] = value
+                dist[j][i] = value
+    elif fmt == "LOWER_DIAG_COL":
+        for j in range(dimension):
+            for i in range(j, dimension):
+                value = take()
+                dist[i][j] = value
+                dist[j][i] = value
+    else:
+        raise ValueError(f"Desteklenmeyen EDGE_WEIGHT_FORMAT: {edge_weight_format}")
+
+    if idx != len(flat_values):
+        raise ValueError("EDGE_WEIGHT_SECTION beklenenden uzun")
+
+    return dist
+
 
 def load_hfvrp_instance_from_vrplib(
         file_path: str | Path,
-        treat_vehicle_costs_as_fixed: bool = True
+        benchmark_compatible_hfvrp_costs: bool = True
 ) -> HCVRPProblem:
 
     path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset bulunamadi: {path}")
+    if path.stat().st_size == 0:
+        raise ValueError(f"Dataset bos: {path}")
+
     lines = path.read_text(encoding = "utf-8").splitlines()
 
     sections: Dict[str, List[str]] = {
         "NODE_COORD_SECTION": [],
         "DEMAND_SECTION": [],
+        "EDGE_WEIGHT_SECTION": [],
         "CAPACITY_SECTION": [],
+        "VEHICLES_FIXED_COST_SECTION": [],
         "VEHICLES_UNIT_DISTANCE_COST_SECTION": [],
         "DEPOT_SECTION": [],
     }
@@ -161,8 +280,13 @@ def load_hfvrp_instance_from_vrplib(
             metadata[key.strip()] = value.strip()
 
     edge_weight_type = metadata.get("EDGE_WEIGHT_TYPE", "").upper()
-    if edge_weight_type != "EUC_2D":
-        raise ValueError(f"Desteklenmeyen EDGE_WEIGHT_TYPE: {edge_weight_type}")
+    edge_weight_format = metadata.get("EDGE_WEIGHT_FORMAT", "").upper()
+
+    if "DIMENSION" not in metadata:
+        raise ValueError(
+            f"DIMENSION alani bulunamadi: {path}. "
+            "Dosya VRPLIB formatinda olmayabilir veya bos olabilir."
+        )
 
     dimension = int(metadata["DIMENSION"])
     depot_vrplib_id = int(sections["DEPOT_SECTION"][0])
@@ -170,8 +294,10 @@ def load_hfvrp_instance_from_vrplib(
 
     raw_coords: Dict[int, Point] = {}
     for entry in sections["NODE_COORD_SECTION"]:
-        node_id_str, x_str, y_str = entry.split()
-        raw_coords[int(node_id_str) - 1] = (float(x_str), float(y_str))
+        parts = entry.split()
+        if len(parts) >= 3:
+            node_id_str, x_str, y_str = parts[:3]
+            raw_coords[int(node_id_str) - 1] = (float(x_str), float(y_str))
 
     raw_demands: Dict[int, float] = {}
     for entry in sections["DEMAND_SECTION"]:
@@ -188,8 +314,10 @@ def load_hfvrp_instance_from_vrplib(
         _, cost_str = entry.split()
         variable_costs.append(float(cost_str))
 
-    if len(raw_coords) != dimension:
-        raise ValueError("NODE_COORD_SECTION ile DIMENSION uyusmuyor")
+    fixed_costs: List[float] = []
+    for entry in sections["VEHICLES_FIXED_COST_SECTION"]:
+        _, cost_str = entry.split()
+        fixed_costs.append(float(cost_str))
 
     if len(raw_demands) != dimension:
         raise ValueError("DEMAND_SECTION ile DIMENSION uyusmuyor")
@@ -197,23 +325,57 @@ def load_hfvrp_instance_from_vrplib(
     if len(capacities) != len(variable_costs):
         raise ValueError("Kapasite ve maliyet satir sayilari ayni olmali")
 
+    if fixed_costs and len(capacities) != len(fixed_costs):
+        raise ValueError("Kapasite ve fixed cost satir sayilari ayni olmali")
+
+    if not fixed_costs:
+        fixed_costs = [0.0 for _ in capacities]
+
     order = [depot_zero_based] + [idx for idx in range(dimension) if idx != depot_zero_based]
     old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(order)}
 
-    coords = [raw_coords[old_idx] for old_idx in order]
+    if edge_weight_type == "EXPLICIT":
+        if not edge_weight_format:
+            raise ValueError("EXPLICIT icin EDGE_WEIGHT_FORMAT gerekli")
+        flat_values: List[float] = []
+        for entry in sections["EDGE_WEIGHT_SECTION"]:
+            flat_values.extend(float(token) for token in entry.split())
+        raw_dist = parse_explicit_edge_weight_matrix(flat_values, dimension, edge_weight_format)
+        coords = [(0.0, 0.0) for _ in range(dimension)]
+    else:
+        if len(raw_coords) != dimension:
+            raise ValueError("NODE_COORD_SECTION ile DIMENSION uyusmuyor")
+        raw_coord_list = [raw_coords[idx] for idx in range(dimension)]
+        raw_dist = build_distance_matrix_from_coords(raw_coord_list, edge_weight_type)
+        coords = [raw_coords[old_idx] for old_idx in order]
+
     demands = [raw_demands[old_idx] for old_idx in order]
     demands[0] = 0.0
 
-    vehicles = [
-        Vehicle(
-            vehicle_id = vehicle_idx,
-            capacity = capacities[vehicle_idx],
-            cost_per_km = 1.0 if treat_vehicle_costs_as_fixed else variable_costs[vehicle_idx],
-            fixed_cost = variable_costs[vehicle_idx] if treat_vehicle_costs_as_fixed else 0.0,
-            speed = 1.0,
-        )
-        for vehicle_idx in range(len(capacities))
-    ]
+    dist = [[raw_dist[old_i][old_j] for old_j in order] for old_i in order]
+
+    if benchmark_compatible_hfvrp_costs and not any(fc != 0.0 for fc in fixed_costs):
+        vehicles = [
+            Vehicle(
+                vehicle_id = vehicle_idx,
+                capacity = capacities[vehicle_idx],
+                cost_per_km = 1.0,
+                fixed_cost = variable_costs[vehicle_idx],
+                speed = 1.0,
+            )
+            for vehicle_idx in range(len(capacities))
+        ]
+    else:
+        vehicles = [
+            Vehicle(
+                vehicle_id = vehicle_idx,
+                capacity = capacities[vehicle_idx],
+                cost_per_km = variable_costs[vehicle_idx],
+                fixed_cost = fixed_costs[vehicle_idx],
+                speed = 1.0,
+            )
+            for vehicle_idx in range(len(capacities))
+        ]
 
     problem = HCVRPProblem(
         coords = coords,
@@ -222,6 +384,7 @@ def load_hfvrp_instance_from_vrplib(
         time_windows = [(0.0, float("inf")) for _ in range(dimension)],
         service_times = [0.0 for _ in range(dimension)],
     )
+    problem.dist = dist
 
     problem.original_vrplib_name = metadata.get("NAME", path.stem)
     problem.original_vrplib_depot_id = depot_vrplib_id
@@ -318,6 +481,9 @@ def evaluate_route_for_vehicle(
 
         if node != 0:
             current_time += problem.service_times[node]
+
+    if len(nr) >= 2:
+        current_time += problem.travel_time(nr[-2], nr[-1], vehicle)
 
     max_route_time_min = getattr(problem, "max_route_time_min", None)
     if max_route_time_min is not None and current_time > max_route_time_min:
@@ -698,6 +864,63 @@ def clone_solution_state(state: SolutionState) -> SolutionState:
         feasible = state.feasible
     )
 
+def state_edge_similarity(state_a: SolutionState, state_b: SolutionState) -> float:
+
+    sig_a = build_edge_signature_from_routes(state_a.routes)
+    sig_b = build_edge_signature_from_routes(state_b.routes)
+
+    if not sig_a and not sig_b:
+        return 1.0
+    if not sig_a or not sig_b:
+        return 0.0
+
+    inter = len(sig_a & sig_b)
+    union = len(sig_a | sig_b)
+    if union == 0:
+        return 1.0
+    return inter / union
+
+def update_elite_pool(
+        elite_pool: List[SolutionState],
+        candidate_states: List[SolutionState],
+        max_size: int = 6,
+        max_similarity: float = 0.90
+) -> List[SolutionState]:
+
+    combined = [clone_solution_state(state) for state in elite_pool]
+    combined.extend(clone_solution_state(state) for state in candidate_states if state.feasible)
+    combined.sort(key = lambda s: s.total_cost)
+
+    new_pool: List[SolutionState] = []
+
+    for candidate in combined:
+        if any(state_edge_similarity(candidate, existing) > max_similarity for existing in new_pool):
+            continue
+        new_pool.append(candidate)
+        if len(new_pool) >= max_size:
+            break
+
+    if not new_pool and combined:
+        new_pool.append(clone_solution_state(combined[0]))
+
+    return new_pool
+
+def choose_elite_guide(
+        elite_pool: List[SolutionState],
+        reference_state: SolutionState
+) -> Optional[SolutionState]:
+
+    if not elite_pool:
+        return None
+
+    ranked = []
+    for state in elite_pool:
+        sim = state_edge_similarity(state, reference_state)
+        ranked.append((sim, state.total_cost, state))
+
+    ranked.sort(key = lambda x: (x[0], x[1]))
+    return clone_solution_state(ranked[0][2])
+
 def route_count(state: SolutionState) -> int:
 
     return len(state.routes)
@@ -963,6 +1186,383 @@ def minmax_normalize_values(values: List[float]) -> List[float]:
         return [1.0 for _ in values]
 
     return [(v - v_min) / (v_max - v_min) for v in values]
+
+def evenly_spaced_positions(
+        start: int,
+        stop_exclusive: int,
+        max_count: int
+) -> List[int]:
+
+    values = list(range(start, stop_exclusive))
+    if max_count <= 0 or not values:
+        return []
+    if len(values) <= max_count:
+        return values
+    if max_count == 1:
+        return [values[len(values) // 2]]
+
+    step = (len(values) - 1) / (max_count - 1)
+    selected = []
+    seen = set()
+
+    for idx in range(max_count):
+        value = values[int(round(idx * step))]
+        if value not in seen:
+            selected.append(value)
+            seen.add(value)
+
+    return selected
+
+def get_problem_scale_profile(
+        problem: HCVRPProblem,
+        active_route_count: Optional[int] = None
+) -> Dict[str, float]:
+
+    n_customers = len(problem.customer_ids)
+    if active_route_count is None:
+        active_route_count = min(
+            len(problem.vehicles),
+            max(1, int(round(math.sqrt(max(n_customers, 1)))))
+        )
+
+    route_density = n_customers / max(active_route_count, 1)
+
+    if active_route_count <= 15 or route_density >= 8.5:
+        return {
+            "regret_customer_limit": 12,
+            "regret_route_limit": 4,
+        }
+
+    if active_route_count <= 25 or route_density >= 6.5:
+        return {
+            "regret_customer_limit": 18,
+            "regret_route_limit": 6,
+        }
+
+    return {
+        "regret_customer_limit": 24,
+        "regret_route_limit": 8,
+    }
+
+def get_local_search_limits(state: SolutionState) -> Dict[str, float]:
+
+    route_lengths = [len(route_core(route)) for route in state.routes if len(route_core(route)) > 0]
+    if not route_lengths:
+        return {
+            "long_route_mode": False,
+            "intra_routes": 6,
+            "relocate_pairs": 8,
+            "two_opt_pairs": 6,
+            "cross_pairs": 5,
+            "max_cuts_per_route": 5,
+            "max_cross_starts": 5,
+            "path_customers": 20,
+            "path_steps": 6,
+            "ls_rounds": 3,
+            "route_elimination_tries": 2,
+        }
+
+    avg_len = sum(route_lengths) / len(route_lengths)
+    max_len = max(route_lengths)
+    long_route_mode = avg_len >= 8.0 or max_len >= 12
+
+    if long_route_mode:
+        return {
+            "long_route_mode": True,
+            "intra_routes": 4,
+            "relocate_pairs": 4,
+            "two_opt_pairs": 3,
+            "cross_pairs": 2,
+            "max_cuts_per_route": 3,
+            "max_cross_starts": 3,
+            "path_customers": 8,
+            "path_steps": 2,
+            "ls_rounds": 1,
+            "route_elimination_tries": 1,
+        }
+
+    if avg_len >= 6.0 or max_len >= 9:
+        return {
+            "long_route_mode": False,
+            "intra_routes": 5,
+            "relocate_pairs": 6,
+            "two_opt_pairs": 4,
+            "cross_pairs": 3,
+            "max_cuts_per_route": 4,
+            "max_cross_starts": 4,
+            "path_customers": 12,
+            "path_steps": 4,
+            "ls_rounds": 2,
+            "route_elimination_tries": 1,
+        }
+
+    return {
+        "long_route_mode": False,
+        "intra_routes": 6,
+        "relocate_pairs": 8,
+        "two_opt_pairs": 6,
+        "cross_pairs": 5,
+        "max_cuts_per_route": 5,
+        "max_cross_starts": 5,
+        "path_customers": 20,
+        "path_steps": 6,
+        "ls_rounds": 3,
+        "route_elimination_tries": 2,
+    }
+
+def select_promising_route_pairs(
+        problem: HCVRPProblem,
+        routes: Route_matrix,
+        max_pairs: int = 10
+) -> List[tuple[int, int]]:
+
+    non_empty = [i for i, route in enumerate(routes) if len(route_core(route)) >= 1]
+    if len(non_empty) < 2:
+        return []
+
+    centroids = compute_route_centroids(problem, routes)
+    scored_pairs = []
+
+    for idx_i in range(len(non_empty)):
+        i = non_empty[idx_i]
+        xi, yi = centroids[i]
+        for idx_j in range(idx_i + 1, len(non_empty)):
+            j = non_empty[idx_j]
+            xj, yj = centroids[j]
+            dx = xi - xj
+            dy = yi - yj
+            scored_pairs.append((dx * dx + dy * dy, i, j))
+
+    scored_pairs.sort(key = lambda x: (x[0], x[1], x[2]))
+    return [(i, j) for _, i, j in scored_pairs[:max_pairs]]
+
+def best_improving_intra_route_2opt(
+        problem: HCVRPProblem,
+        state: SolutionState,
+        max_routes: int = 6
+) -> SolutionState:
+
+    best_state = clone_solution_state(state)
+    route_candidates = [
+        (state.route_costs[r_idx], r_idx)
+        for r_idx, route in enumerate(state.routes)
+        if len(route_core(route)) >= 4
+    ]
+    route_candidates.sort(key = lambda x: (-x[0], x[1]))
+
+    for _, r_idx in route_candidates[:max_routes]:
+        core = route_core(state.routes[r_idx])
+        for i in range(len(core) - 2):
+            for k in range(i + 1, len(core) - 1):
+                new_core = core[:i] + core[i:k + 1][::-1] + core[k + 1:]
+                candidate_routes = clone_routes(state.routes)
+                candidate_routes[r_idx] = [0] + new_core + [0]
+                candidate_state = evaluate_solution(problem, candidate_routes, state.vehicle_ids)
+                if candidate_state.feasible and candidate_state.total_cost < best_state.total_cost:
+                    best_state = candidate_state
+
+    return best_state
+
+def best_improving_inter_route_relocate(
+        problem: HCVRPProblem,
+        state: SolutionState,
+        max_pairs: int = 8
+) -> SolutionState:
+
+    best_state = clone_solution_state(state)
+    for from_idx, to_idx in select_promising_route_pairs(problem, state.routes, max_pairs = max_pairs):
+        from_core = route_core(state.routes[from_idx])
+        to_route = state.routes[to_idx]
+
+        for pos_from, customer in enumerate(from_core):
+            reduced_core = from_core[:pos_from] + from_core[pos_from + 1:]
+            insert_pos, _ = choose_best_insertion_position(problem, to_route, customer)
+
+            candidate_routes = clone_routes(state.routes)
+            candidate_routes[from_idx] = [0] + reduced_core + [0]
+            to_core = route_core(to_route)
+            to_core.insert(insert_pos - 1, customer)
+            candidate_routes[to_idx] = [0] + to_core + [0]
+            candidate_routes, candidate_vehicle_ids = remove_empty_routes(candidate_routes, state.vehicle_ids[:])
+
+            candidate_state = evaluate_solution(problem, candidate_routes, candidate_vehicle_ids)
+            if candidate_state.feasible and candidate_state.total_cost < best_state.total_cost:
+                best_state = candidate_state
+
+    return best_state
+
+def best_improving_inter_route_2opt_star(
+        problem: HCVRPProblem,
+        state: SolutionState,
+        max_pairs: int = 6,
+        max_cuts_per_route: int = 5
+) -> SolutionState:
+
+    best_state = clone_solution_state(state)
+
+    for r1, r2 in select_promising_route_pairs(problem, state.routes, max_pairs = max_pairs):
+        core1 = route_core(state.routes[r1])
+        core2 = route_core(state.routes[r2])
+        if len(core1) < 2 or len(core2) < 2:
+            continue
+
+        cut_positions_1 = evenly_spaced_positions(1, len(core1), max_cuts_per_route)
+        cut_positions_2 = evenly_spaced_positions(1, len(core2), max_cuts_per_route)
+
+        for cut1 in cut_positions_1:
+            for cut2 in cut_positions_2:
+                new_core1 = core1[:cut1] + core2[cut2:]
+                new_core2 = core2[:cut2] + core1[cut1:]
+
+                candidate_routes = clone_routes(state.routes)
+                candidate_routes[r1] = [0] + new_core1 + [0]
+                candidate_routes[r2] = [0] + new_core2 + [0]
+                candidate_state = evaluate_solution(problem, candidate_routes, state.vehicle_ids)
+
+                if candidate_state.feasible and candidate_state.total_cost < best_state.total_cost:
+                    best_state = candidate_state
+
+    return best_state
+
+def best_improving_cross_exchange(
+        problem: HCVRPProblem,
+        state: SolutionState,
+        max_pairs: int = 5,
+        max_block_size: int = 2,
+        max_start_positions: int = 5
+) -> SolutionState:
+
+    best_state = clone_solution_state(state)
+
+    for r1, r2 in select_promising_route_pairs(problem, state.routes, max_pairs = max_pairs):
+        core1 = route_core(state.routes[r1])
+        core2 = route_core(state.routes[r2])
+        if not core1 or not core2:
+            continue
+
+        max_len1 = min(max_block_size, len(core1))
+        max_len2 = min(max_block_size, len(core2))
+
+        for len1 in range(1, max_len1 + 1):
+            for len2 in range(1, max_len2 + 1):
+                start_positions_1 = evenly_spaced_positions(
+                    0,
+                    len(core1) - len1 + 1,
+                    max_start_positions
+                )
+                start_positions_2 = evenly_spaced_positions(
+                    0,
+                    len(core2) - len2 + 1,
+                    max_start_positions
+                )
+
+                for start1 in start_positions_1:
+                    block1 = core1[start1:start1 + len1]
+                    rest1 = core1[:start1] + core1[start1 + len1:]
+                    for start2 in start_positions_2:
+                        block2 = core2[start2:start2 + len2]
+                        rest2 = core2[:start2] + core2[start2 + len2:]
+
+                        new_core1 = rest1[:start1] + block2 + rest1[start1:]
+                        new_core2 = rest2[:start2] + block1 + rest2[start2:]
+
+                        candidate_routes = clone_routes(state.routes)
+                        candidate_routes[r1] = [0] + new_core1 + [0]
+                        candidate_routes[r2] = [0] + new_core2 + [0]
+                        candidate_state = evaluate_solution(problem, candidate_routes, state.vehicle_ids)
+
+                        if candidate_state.feasible and candidate_state.total_cost < best_state.total_cost:
+                            best_state = candidate_state
+
+    return best_state
+
+def stagnation_kick(
+        problem: HCVRPProblem,
+        state: SolutionState,
+        ruin_frac: float = 0.35
+) -> SolutionState:
+
+    kicked = ruin_and_rebuild_routes(
+        problem = problem,
+        state = state,
+        ruin_frac = ruin_frac,
+        destroy_mode = "route"
+    )
+    kicked = intensify_local_search(
+        problem = problem,
+        state = kicked,
+        max_rounds = 3
+    )
+    return kicked
+
+def intensify_local_search(
+        problem: HCVRPProblem,
+        state: SolutionState,
+        max_rounds: int = 3
+) -> SolutionState:
+
+    current = clone_solution_state(state)
+    limits = get_local_search_limits(current)
+    effective_rounds = min(max_rounds, int(limits["ls_rounds"]))
+
+    for _ in range(effective_rounds):
+        improved = False
+
+        candidate = best_improving_intra_route_2opt(
+            problem,
+            current,
+            max_routes = int(limits["intra_routes"])
+        )
+        if candidate.feasible and candidate.total_cost < current.total_cost:
+            current = candidate
+            improved = True
+
+        candidate = best_improving_inter_route_relocate(
+            problem,
+            current,
+            max_pairs = int(limits["relocate_pairs"])
+        )
+        if candidate.feasible and candidate.total_cost < current.total_cost:
+            current = candidate
+            improved = True
+
+        candidate = best_improving_inter_route_2opt_star(
+            problem,
+            current,
+            max_pairs = int(limits["two_opt_pairs"]),
+            max_cuts_per_route = int(limits["max_cuts_per_route"])
+        )
+        if candidate.feasible and candidate.total_cost < current.total_cost:
+            current = candidate
+            improved = True
+
+        candidate = best_improving_cross_exchange(
+            problem,
+            current,
+            max_pairs = int(limits["cross_pairs"]),
+            max_start_positions = int(limits["max_cross_starts"])
+        )
+        if candidate.feasible and candidate.total_cost < current.total_cost:
+            current = candidate
+            improved = True
+
+        for operator in (
+            random_vehicle_reassignment,
+            lambda p, s: route_elimination_phase(
+                p,
+                s,
+                max_routes_to_try = int(limits["route_elimination_tries"])
+            ),
+        ):
+            candidate = operator(problem, current)
+            if candidate.feasible and candidate.total_cost < current.total_cost:
+                current = candidate
+                improved = True
+
+        if not improved:
+            break
+
+    return current
 
 def select_alpha_index(wolves: List[Wolf]) -> int:
 
@@ -1379,8 +1979,8 @@ def choose_regret_customer_insertion(
         used_vehicle_ids: Set[int],
         candidate_customers: List[int],
         regret_k: int = 3,
-        candidate_customer_limit: int = 24,
-        candidate_route_limit: int = 8,
+        candidate_customer_limit: Optional[int] = None,
+        candidate_route_limit: Optional[int] = None,
         allow_new_route: bool = True
 ) -> Optional[tuple[int, tuple[str, int, int, int], float, float]]:
 
@@ -1391,6 +1991,12 @@ def choose_regret_customer_insertion(
         vehicle = get_vehicle_by_id(problem, vehicle_id)
         route_ok, _, _, _, route_cost = evaluate_route_for_vehicle(problem, route, vehicle)
         current_route_costs.append(route_cost if route_ok else None)
+
+    profile = get_problem_scale_profile(problem, active_route_count = max(1, len(routes)))
+    if candidate_customer_limit is None:
+        candidate_customer_limit = int(profile["regret_customer_limit"])
+    if candidate_route_limit is None:
+        candidate_route_limit = int(profile["regret_route_limit"])
 
     if len(candidate_customers) > candidate_customer_limit:
         prioritized = random.sample(candidate_customers, candidate_customer_limit)
@@ -1645,6 +2251,134 @@ def route_elimination_phase(
 
     return best_state
 
+def build_route_customer_sets(routes: Route_matrix) -> List[Set[int]]:
+
+    return [set(route_core(route)) for route in routes]
+
+def build_customer_to_route_set_index(routes: Route_matrix) -> Dict[int, int]:
+
+    mapping: Dict[int, int] = {}
+    for r_idx, route in enumerate(routes):
+        for customer in route_core(route):
+            mapping[customer] = r_idx
+    return mapping
+
+def select_path_relink_customers(
+        current_state: SolutionState,
+        target_state: SolutionState,
+        max_customers: int = 20
+) -> List[int]:
+
+    current_sets = build_route_customer_sets(current_state.routes)
+    target_sets = build_route_customer_sets(target_state.routes)
+    current_map = build_customer_to_route_set_index(current_state.routes)
+    target_map = build_customer_to_route_set_index(target_state.routes)
+
+    scored = []
+    for customer in flatten_customers_from_routes(current_state.routes):
+        current_idx = current_map[customer]
+        target_idx = target_map.get(customer)
+        if target_idx is None:
+            continue
+
+        current_group = current_sets[current_idx]
+        target_group = target_sets[target_idx]
+        overlap = len(current_group & target_group)
+        mismatch = len(target_group) - overlap
+        if mismatch > 0:
+            scored.append((mismatch, len(target_group), customer))
+
+    scored.sort(key = lambda x: (-x[0], -x[1], x[2]))
+    return [customer for _, _, customer in scored[:max_customers]]
+
+def guided_customer_relocation(
+        problem: HCVRPProblem,
+        current_state: SolutionState,
+        target_state: SolutionState,
+        customer: int,
+        max_target_routes: int = 4
+) -> Optional[SolutionState]:
+
+    current_routes = clone_routes(current_state.routes)
+    current_vehicle_ids = current_state.vehicle_ids[:]
+    current_map = build_customer_to_route_map(current_routes)
+    target_route_sets = build_route_customer_sets(target_state.routes)
+    target_map = build_customer_to_route_set_index(target_state.routes)
+
+    from_idx = current_map.get(customer)
+    target_idx = target_map.get(customer)
+    if from_idx is None or target_idx is None:
+        return None
+
+    target_group = target_route_sets[target_idx]
+    route_scores = []
+
+    for r_idx, route in enumerate(current_routes):
+        if r_idx == from_idx:
+            continue
+        overlap = len(set(route_core(route)) & target_group)
+        if overlap > 0:
+            route_scores.append((overlap, -current_state.route_costs[r_idx], r_idx))
+
+    if not route_scores:
+        return None
+
+    route_scores.sort(key = lambda x: (-x[0], x[1], x[2]))
+    best_state = None
+
+    for _, _, to_idx in route_scores[:max_target_routes]:
+        from_core = route_core(current_routes[from_idx])
+        if customer not in from_core:
+            continue
+        reduced_core = [node for node in from_core if node != customer]
+        to_route = current_routes[to_idx]
+        insert_pos, _ = choose_best_insertion_position(problem, to_route, customer)
+        to_core = route_core(to_route)
+        to_core.insert(insert_pos - 1, customer)
+
+        candidate_routes = clone_routes(current_routes)
+        candidate_routes[from_idx] = [0] + reduced_core + [0]
+        candidate_routes[to_idx] = [0] + to_core + [0]
+        candidate_routes, candidate_vehicle_ids = remove_empty_routes(candidate_routes, current_vehicle_ids[:])
+        candidate_state = evaluate_solution(problem, candidate_routes, candidate_vehicle_ids)
+
+        if not candidate_state.feasible:
+            continue
+        if best_state is None or candidate_state.total_cost < best_state.total_cost:
+            best_state = candidate_state
+
+    return best_state
+
+def elite_path_relink(
+        problem: HCVRPProblem,
+        start_state: SolutionState,
+        target_state: SolutionState,
+        max_steps: int = 8
+) -> SolutionState:
+
+    current = clone_solution_state(start_state)
+    best = clone_solution_state(start_state)
+    limits = get_local_search_limits(start_state)
+    effective_steps = min(max_steps, int(limits["path_steps"]))
+    max_customers = int(limits["path_customers"])
+
+    for _ in range(effective_steps):
+        candidates = []
+        for customer in select_path_relink_customers(current, target_state, max_customers = max_customers):
+            candidate = guided_customer_relocation(problem, current, target_state, customer)
+            if candidate is not None:
+                candidates.append(candidate)
+
+        if not candidates:
+            break
+
+        candidates.sort(key = lambda s: s.total_cost)
+        current = candidates[0]
+        if current.feasible and current.total_cost < best.total_cost:
+            best = clone_solution_state(current)
+
+    return best
+
 def alpha_guided_rebuild(
         problem: HCVRPProblem,
         base_state: SolutionState,
@@ -1786,23 +2520,35 @@ def ruin_and_rebuild_routes(
 
 def hunt_one_wolf_towards_alpha(
         wolf: Wolf,
-        alpha_state: SolutionState,
+        guide_state: SolutionState,
         inherit_frac: float = 0.35,
         ruin_frac: float = 0.20,
         rr_repeats: int = 2
 ) -> SolutionState:
-    
     current = alpha_guided_rebuild(
         problem = wolf.problem,
         base_state = wolf.state,
-        alpha_state = alpha_state,
+        alpha_state = guide_state,
         inherit_frac = inherit_frac
     )
-    current = route_elimination_phase(
+    current = intensify_local_search(
         problem = wolf.problem,
         state = current,
-        max_routes_to_try = 1
+        max_rounds = 3
     )
+    relinked = elite_path_relink(
+        problem = wolf.problem,
+        start_state = current,
+        target_state = guide_state,
+        max_steps = 6
+    )
+    relinked = intensify_local_search(
+        problem = wolf.problem,
+        state = relinked,
+        max_rounds = 2
+    )
+    if relinked.feasible and relinked.total_cost < current.total_cost:
+        current = relinked
 
     best = current
 
@@ -1815,10 +2561,10 @@ def hunt_one_wolf_towards_alpha(
             ruin_frac = ruin_frac,
             destroy_mode = destroy_mode
         )
-        candidate = route_elimination_phase(
+        candidate = intensify_local_search(
             problem = wolf.problem,
             state = candidate,
-            max_routes_to_try = 1
+            max_rounds = 3
         )
         if candidate.total_cost < best.total_cost:
 
@@ -1829,6 +2575,7 @@ def hunt_one_wolf_towards_alpha(
 def hunt_around_alpha(
         wolves: List[Wolf],
         alpha_idx: int,
+        elite_pool: Optional[List[SolutionState]] = None,
         inherit_frac: float = 0.35,
         ruin_frac: float = 0.20,
         rr_repeats: int = 2
@@ -1845,14 +2592,26 @@ def hunt_around_alpha(
         if i == alpha_idx:
 
             continue
-        
-        candidate = hunt_one_wolf_towards_alpha(
-            wolf = wolf,
-            alpha_state = alpha_state,
-            inherit_frac = inherit_frac,
-            ruin_frac = ruin_frac,
-            rr_repeats = rr_repeats
-        )
+
+        guide_states = [alpha_state]
+        elite_guide = choose_elite_guide(elite_pool or [], wolf.state)
+        if elite_guide is not None and state_edge_similarity(elite_guide, alpha_state) < 0.98:
+            guide_states.append(elite_guide)
+
+        candidate = None
+        for guide_state in guide_states:
+            guided_candidate = hunt_one_wolf_towards_alpha(
+                wolf = wolf,
+                guide_state = guide_state,
+                inherit_frac = inherit_frac,
+                ruin_frac = ruin_frac,
+                rr_repeats = rr_repeats
+            )
+            if candidate is None or guided_candidate.total_cost < candidate.total_cost:
+                candidate = guided_candidate
+
+        if candidate is None:
+            continue
 
         wolf.update_if_better(candidate)
 
@@ -1898,14 +2657,16 @@ def run_bloodhound_hcvrp(
 
     if random_seed is not None:
         random.seed(random_seed)
-    
+
     wolves = initialize_wolves(problem, num_wolves)
 
     update_population_quality_scores(wolves)
 
     global_best = get_global_best_state(wolves)
+    elite_pool = update_elite_pool([], [w.best_state for w in wolves] + [global_best])
 
     closed_regions: List[Set[Edge]] = []
+    hunts_without_global_improvement = 0
 
     if verbose:
 
@@ -1936,19 +2697,37 @@ def run_bloodhound_hcvrp(
         hunt_best_state, hunt_best_cost = hunt_around_alpha(
                 wolves = wolves,
                 alpha_idx = alpha_idx,
+                elite_pool = elite_pool,
                 inherit_frac = inherit_frac,
                 ruin_frac = ruin_frac,
                 rr_repeats = rr_repeats
             )
 
+        if hunts_without_global_improvement >= 4:
+            kick_candidate = stagnation_kick(
+                problem = problem,
+                state = hunt_best_state,
+                ruin_frac = min(0.45, ruin_frac + 0.15)
+            )
+            if kick_candidate.feasible and kick_candidate.total_cost < hunt_best_cost:
+                hunt_best_state = kick_candidate
+                hunt_best_cost = kick_candidate.total_cost
+
         if hunt_best_cost < global_best.total_cost:
 
                 global_best = wolves[alpha_idx].clone_state(hunt_best_state)
+                hunts_without_global_improvement = 0
+        else:
+                hunts_without_global_improvement += 1
 
         sig = build_edge_signature_from_routes(hunt_best_state.routes)
         closed_regions.append(sig)
 
         update_population_quality_scores(wolves)
+        elite_pool = update_elite_pool(
+            elite_pool,
+            [w.best_state for w in wolves] + [hunt_best_state, global_best]
+        )
 
         if verbose:
 
@@ -1964,7 +2743,9 @@ def run_bloodhound_hcvrp(
                 f"pop_min={c_min:.4f} | "
                 f"pop_mean={c_mean:.4f} | "
                 f"pop_max={c_max:.4f} | "
-                f"closed_regions={len(closed_regions)}"
+                f"closed_regions={len(closed_regions)} | "
+                f"stagnation={hunts_without_global_improvement} | "
+                f"elite_pool={len(elite_pool)}"
 
             )
     return global_best
@@ -1975,8 +2756,18 @@ def run_bloodhound_hcvrp(
 # =========================
 
 if __name__ == "__main__":
-    TEST_RANDOM_SEED = 0
-    DATA_FILE = Path(__file__).resolve().parent / "Test_data" / "X200-HD.txt"
+    TEST_RANDOM_SEED = 2
+    DATA_FILE = Path(__file__).resolve().parent / "Test_data" / "X219-HD.txt"
+    if (not DATA_FILE.exists()) or DATA_FILE.stat().st_size == 0:
+        fallback_files = sorted(
+            [
+                path for path in (Path(__file__).resolve().parent / "Test_data").glob("*.txt")
+                if path.stat().st_size > 0
+            ]
+        )
+        if not fallback_files:
+            raise ValueError("Test_data icinde kullanilabilir dolu bir dataset yok.")
+        DATA_FILE = fallback_files[0]
     # NODE_COORD_SECTION (125 Düğüm, Depot = coords[0])
     coords = [
         (989, 944), (5, 730), (769, 200), (698, 515), (72, 561), (52, 397), (771, 177), (81, 537), (43, 371), (716, 202),
@@ -2041,8 +2832,8 @@ if __name__ == "__main__":
 
     best_state = run_bloodhound_hcvrp(
         problem=problem,
-        num_wolves=20,
-        num_hunts= 100,
+        num_wolves=6,
+        num_hunts=15,
         explore_iterations=150,
         reserve_blood=2.5,
         lambda_reg=1.0,
