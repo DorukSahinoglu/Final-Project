@@ -10,6 +10,72 @@ Route_matrix = List[Route]
 Distance_matrix = List[List[float]]
 Edge = Tuple[int, int]
 
+ALGO_CONFIG = {
+    "alpha_cost_weight": 0.60,
+    "alpha_blood_weight": 0.25,
+    "alpha_history_weight": 0.15,
+    "elite_pool_max_size": 6,
+    "elite_max_similarity": 0.90,
+    "regret3_probability": 0.50,
+    "destroy_prob_shaw": 0.45,
+    "destroy_prob_worst": 0.35,
+    "route_elimination_max_routes": 2,
+    "stagnation_hunt_limit": 4,
+    "stagnation_ruin_boost": 0.15,
+    "stagnation_ruin_cap": 0.45,
+    "adaptive_small_route_count": 15,
+    "adaptive_medium_route_count": 25,
+    "adaptive_dense_route_threshold": 8.5,
+    "adaptive_medium_route_threshold": 6.5,
+    "adaptive_profiles": {
+        "dense": {
+            "regret_customer_limit": 12,
+            "regret_route_limit": 4,
+            "long_route_mode": True,
+            "intra_routes": 4,
+            "relocate_pairs": 4,
+            "two_opt_pairs": 3,
+            "cross_pairs": 2,
+            "max_cuts_per_route": 3,
+            "max_cross_starts": 3,
+            "path_customers": 8,
+            "path_steps": 2,
+            "ls_rounds": 1,
+            "route_elimination_tries": 1,
+        },
+        "medium": {
+            "regret_customer_limit": 18,
+            "regret_route_limit": 6,
+            "long_route_mode": False,
+            "intra_routes": 5,
+            "relocate_pairs": 6,
+            "two_opt_pairs": 4,
+            "cross_pairs": 3,
+            "max_cuts_per_route": 4,
+            "max_cross_starts": 4,
+            "path_customers": 12,
+            "path_steps": 4,
+            "ls_rounds": 2,
+            "route_elimination_tries": 1,
+        },
+        "light": {
+            "regret_customer_limit": 24,
+            "regret_route_limit": 8,
+            "long_route_mode": False,
+            "intra_routes": 6,
+            "relocate_pairs": 8,
+            "two_opt_pairs": 6,
+            "cross_pairs": 5,
+            "max_cuts_per_route": 5,
+            "max_cross_starts": 5,
+            "path_customers": 20,
+            "path_steps": 6,
+            "ls_rounds": 3,
+            "route_elimination_tries": 2,
+        },
+    },
+}
+
 @dataclass
 class Vehicle:
     vehicle_id: int
@@ -883,9 +949,14 @@ def state_edge_similarity(state_a: SolutionState, state_b: SolutionState) -> flo
 def update_elite_pool(
         elite_pool: List[SolutionState],
         candidate_states: List[SolutionState],
-        max_size: int = 6,
-        max_similarity: float = 0.90
+        max_size: Optional[int] = None,
+        max_similarity: Optional[float] = None
 ) -> List[SolutionState]:
+
+    if max_size is None:
+        max_size = int(ALGO_CONFIG["elite_pool_max_size"])
+    if max_similarity is None:
+        max_similarity = float(ALGO_CONFIG["elite_max_similarity"])
 
     combined = [clone_solution_state(state) for state in elite_pool]
     combined.extend(clone_solution_state(state) for state in candidate_states if state.feasible)
@@ -1227,88 +1298,37 @@ def get_problem_scale_profile(
 
     route_density = n_customers / max(active_route_count, 1)
 
-    if active_route_count <= 15 or route_density >= 8.5:
-        return {
-            "regret_customer_limit": 12,
-            "regret_route_limit": 4,
-        }
+    if (
+        active_route_count <= int(ALGO_CONFIG["adaptive_small_route_count"])
+        or route_density >= float(ALGO_CONFIG["adaptive_dense_route_threshold"])
+    ):
+        return dict(ALGO_CONFIG["adaptive_profiles"]["dense"])
 
-    if active_route_count <= 25 or route_density >= 6.5:
-        return {
-            "regret_customer_limit": 18,
-            "regret_route_limit": 6,
-        }
+    if (
+        active_route_count <= int(ALGO_CONFIG["adaptive_medium_route_count"])
+        or route_density >= float(ALGO_CONFIG["adaptive_medium_route_threshold"])
+    ):
+        return dict(ALGO_CONFIG["adaptive_profiles"]["medium"])
 
-    return {
-        "regret_customer_limit": 24,
-        "regret_route_limit": 8,
-    }
+    return dict(ALGO_CONFIG["adaptive_profiles"]["light"])
 
 def get_local_search_limits(state: SolutionState) -> Dict[str, float]:
 
     route_lengths = [len(route_core(route)) for route in state.routes if len(route_core(route)) > 0]
     if not route_lengths:
-        return {
-            "long_route_mode": False,
-            "intra_routes": 6,
-            "relocate_pairs": 8,
-            "two_opt_pairs": 6,
-            "cross_pairs": 5,
-            "max_cuts_per_route": 5,
-            "max_cross_starts": 5,
-            "path_customers": 20,
-            "path_steps": 6,
-            "ls_rounds": 3,
-            "route_elimination_tries": 2,
-        }
+        return dict(ALGO_CONFIG["adaptive_profiles"]["light"])
 
     avg_len = sum(route_lengths) / len(route_lengths)
     max_len = max(route_lengths)
     long_route_mode = avg_len >= 8.0 or max_len >= 12
 
     if long_route_mode:
-        return {
-            "long_route_mode": True,
-            "intra_routes": 4,
-            "relocate_pairs": 4,
-            "two_opt_pairs": 3,
-            "cross_pairs": 2,
-            "max_cuts_per_route": 3,
-            "max_cross_starts": 3,
-            "path_customers": 8,
-            "path_steps": 2,
-            "ls_rounds": 1,
-            "route_elimination_tries": 1,
-        }
+        return dict(ALGO_CONFIG["adaptive_profiles"]["dense"])
 
     if avg_len >= 6.0 or max_len >= 9:
-        return {
-            "long_route_mode": False,
-            "intra_routes": 5,
-            "relocate_pairs": 6,
-            "two_opt_pairs": 4,
-            "cross_pairs": 3,
-            "max_cuts_per_route": 4,
-            "max_cross_starts": 4,
-            "path_customers": 12,
-            "path_steps": 4,
-            "ls_rounds": 2,
-            "route_elimination_tries": 1,
-        }
+        return dict(ALGO_CONFIG["adaptive_profiles"]["medium"])
 
-    return {
-        "long_route_mode": False,
-        "intra_routes": 6,
-        "relocate_pairs": 8,
-        "two_opt_pairs": 6,
-        "cross_pairs": 5,
-        "max_cuts_per_route": 5,
-        "max_cross_starts": 5,
-        "path_customers": 20,
-        "path_steps": 6,
-        "ls_rounds": 3,
-        "route_elimination_tries": 2,
-    }
+    return dict(ALGO_CONFIG["adaptive_profiles"]["light"])
 
 def select_promising_route_pairs(
         problem: HCVRPProblem,
@@ -1574,9 +1594,17 @@ def select_alpha_index(wolves: List[Wolf]) -> int:
     blood_quality = minmax_normalize_values(bloods)
     history_quality = minmax_normalize_values(history_qualities)
 
-    cost_weight = 0.60
-    blood_weight = 0.25
-    history_weight = 0.15
+    cost_weight = float(ALGO_CONFIG["alpha_cost_weight"])
+    blood_weight = float(ALGO_CONFIG["alpha_blood_weight"])
+    history_weight = float(ALGO_CONFIG["alpha_history_weight"])
+
+    weight_sum = cost_weight + blood_weight + history_weight
+    if weight_sum <= 0:
+        cost_weight, blood_weight, history_weight = 1.0, 0.0, 0.0
+    else:
+        cost_weight /= weight_sum
+        blood_weight /= weight_sum
+        history_weight /= weight_sum
 
     best_idx = 0
     best_score = (
@@ -2034,7 +2062,7 @@ def choose_regret_customer_insertion(
 
 def sample_regret_k() -> int:
 
-    return 3 if random.random() < 0.50 else 2
+    return 3 if random.random() < float(ALGO_CONFIG["regret3_probability"]) else 2
 
 def customer_relatedness(problem: HCVRPProblem, a: int, b: int) -> float:
 
@@ -2149,10 +2177,12 @@ def choose_destroy_customers(
 
 def sample_destroy_mode() -> str:
 
+    prob_shaw = max(0.0, min(1.0, float(ALGO_CONFIG["destroy_prob_shaw"])))
+    prob_worst = max(0.0, min(1.0 - prob_shaw, float(ALGO_CONFIG["destroy_prob_worst"])))
     roll = random.random()
-    if roll < 0.45:
+    if roll < prob_shaw:
         return "shaw"
-    if roll < 0.80:
+    if roll < prob_shaw + prob_worst:
         return "worst"
     return "route"
 
@@ -2174,8 +2204,11 @@ def remove_customers_from_routes(
 def route_elimination_phase(
         problem: HCVRPProblem,
         state: SolutionState,
-        max_routes_to_try: int = 2
+        max_routes_to_try: Optional[int] = None
 ) -> SolutionState:
+
+    if max_routes_to_try is None:
+        max_routes_to_try = int(ALGO_CONFIG["route_elimination_max_routes"])
 
     if len(state.routes) <= 1:
         return clone_solution_state(state)
@@ -2703,11 +2736,14 @@ def run_bloodhound_hcvrp(
                 rr_repeats = rr_repeats
             )
 
-        if hunts_without_global_improvement >= 4:
+        if hunts_without_global_improvement >= int(ALGO_CONFIG["stagnation_hunt_limit"]):
             kick_candidate = stagnation_kick(
                 problem = problem,
                 state = hunt_best_state,
-                ruin_frac = min(0.45, ruin_frac + 0.15)
+                ruin_frac = min(
+                    float(ALGO_CONFIG["stagnation_ruin_cap"]),
+                    ruin_frac + float(ALGO_CONFIG["stagnation_ruin_boost"])
+                )
             )
             if kick_candidate.feasible and kick_candidate.total_cost < hunt_best_cost:
                 hunt_best_state = kick_candidate
@@ -2757,11 +2793,94 @@ def run_bloodhound_hcvrp(
 
 if __name__ == "__main__":
     TEST_RANDOM_SEED = 2
-    DATA_FILE = Path(__file__).resolve().parent / "Test_data" / "X219-HD.txt"
+    DATASET_DIR = Path(__file__).resolve().parent / "Test_data"
+    DATA_FILE = DATASET_DIR / "X219-HD.txt"
+    SEARCH_PARAMS = {
+        "num_wolves": 6,
+        "num_hunts": 15,
+        "explore_iterations": 150,
+        "reserve_blood": 2.5,
+        "lambda_reg": 1.0,
+        "a": 1.0,
+        "b": 2.0,
+        "c": 1.3,
+        "b_par": 1.2,
+        "inherit_frac": 0.85,
+        "ruin_frac": 0.10,
+        "rr_repeats": 5,
+        "verbose": True,
+        "random_seed": TEST_RANDOM_SEED,
+    }
+    HYPERPARAMS = {
+        "alpha_cost_weight": 0.60,
+        "alpha_blood_weight": 0.25,
+        "alpha_history_weight": 0.15,
+        "elite_pool_max_size": 6,
+        "elite_max_similarity": 0.90,
+        "regret3_probability": 0.50,
+        "destroy_prob_shaw": 0.45,
+        "destroy_prob_worst": 0.35,
+        "route_elimination_max_routes": 2,
+        "stagnation_hunt_limit": 4,
+        "stagnation_ruin_boost": 0.15,
+        "stagnation_ruin_cap": 0.45,
+        "adaptive_small_route_count": 15,
+        "adaptive_medium_route_count": 25,
+        "adaptive_dense_route_threshold": 8.5,
+        "adaptive_medium_route_threshold": 6.5,
+        "adaptive_profiles": {
+            "dense": {
+                "regret_customer_limit": 12,
+                "regret_route_limit": 4,
+                "long_route_mode": True,
+                "intra_routes": 4,
+                "relocate_pairs": 4,
+                "two_opt_pairs": 3,
+                "cross_pairs": 2,
+                "max_cuts_per_route": 3,
+                "max_cross_starts": 3,
+                "path_customers": 8,
+                "path_steps": 2,
+                "ls_rounds": 1,
+                "route_elimination_tries": 1,
+            },
+            "medium": {
+                "regret_customer_limit": 18,
+                "regret_route_limit": 6,
+                "long_route_mode": False,
+                "intra_routes": 5,
+                "relocate_pairs": 6,
+                "two_opt_pairs": 4,
+                "cross_pairs": 3,
+                "max_cuts_per_route": 4,
+                "max_cross_starts": 4,
+                "path_customers": 12,
+                "path_steps": 4,
+                "ls_rounds": 2,
+                "route_elimination_tries": 1,
+            },
+            "light": {
+                "regret_customer_limit": 24,
+                "regret_route_limit": 8,
+                "long_route_mode": False,
+                "intra_routes": 6,
+                "relocate_pairs": 8,
+                "two_opt_pairs": 6,
+                "cross_pairs": 5,
+                "max_cuts_per_route": 5,
+                "max_cross_starts": 5,
+                "path_customers": 20,
+                "path_steps": 6,
+                "ls_rounds": 3,
+                "route_elimination_tries": 2,
+            },
+        },
+    }
+    ALGO_CONFIG.update(HYPERPARAMS)
     if (not DATA_FILE.exists()) or DATA_FILE.stat().st_size == 0:
         fallback_files = sorted(
             [
-                path for path in (Path(__file__).resolve().parent / "Test_data").glob("*.txt")
+                path for path in DATASET_DIR.glob("*.txt")
                 if path.stat().st_size > 0
             ]
         )
@@ -2769,84 +2888,11 @@ if __name__ == "__main__":
             raise ValueError("Test_data icinde kullanilabilir dolu bir dataset yok.")
         DATA_FILE = fallback_files[0]
     # NODE_COORD_SECTION (125 Düğüm, Depot = coords[0])
-    coords = [
-        (989, 944), (5, 730), (769, 200), (698, 515), (72, 561), (52, 397), (771, 177), (81, 537), (43, 371), (716, 202),
-        (106, 406), (627, 172), (10, 338), (776, 432), (761, 469), (759, 287), (593, 363), (773, 290), (129, 398), (709, 193),
-        (99, 564), (163, 418), (48, 619), (907, 406), (929, 527), (69, 672), (675, 960), (50, 763), (736, 240), (46, 518),
-        (128, 793), (699, 581), (58, 398), (43, 393), (783, 186), (58, 360), (45, 712), (38, 393), (652, 524), (37, 364),
-        (37, 617), (61, 534), (664, 358), (555, 445), (712, 465), (38, 469), (2, 729), (65, 620), (156, 497), (857, 475),
-        (773, 234), (879, 98), (685, 466), (21, 421), (109, 536), (60, 738), (897, 564), (96, 383), (76, 582), (739, 193),
-        (669, 548), (284, 462), (193, 813), (15, 696), (102, 541), (28, 578), (828, 292), (73, 519), (70, 645), (40, 433),
-        (745, 159), (0, 486), (75, 511), (228, 312), (732, 427), (61, 407), (495, 621), (84, 538), (751, 246), (22, 714),
-        (63, 571), (641, 350), (873, 540), (211, 418), (287, 618), (155, 796), (627, 595), (546, 199), (795, 58), (805, 15),
-        (649, 486), (145, 377), (673, 319), (700, 678), (86, 623), (158, 613), (673, 619), (738, 444), (17, 449), (122, 182),
-        (108, 334), (100, 550), (677, 505), (23, 365), (20, 512), (892, 41), (452, 457), (70, 541), (224, 931), (67, 692),
-        (198, 317), (513, 731), (159, 369), (51, 378), (556, 137), (800, 100), (795, 278), (158, 773), (43, 656), (41, 488),
-        (70, 375), (132, 545), (203, 328), (728, 467), (759, 208)
-    ]
-
-    # DEMAND_SECTION
-    demands = [
-        0, 32, 7, 83, 30, 62, 26, 31, 75, 5, 85, 15, 94, 16, 38, 32, 5, 17, 92, 50,
-        16, 79, 11, 33, 60, 11, 96, 46, 48, 31, 25, 96, 71, 61, 3, 100, 6, 94, 88, 53,
-        19, 50, 19, 39, 21, 95, 7, 40, 51, 16, 47, 13, 30, 56, 5, 9, 95, 70, 5, 31,
-        80, 53, 28, 38, 7, 28, 18, 31, 6, 71, 1, 84, 47, 68, 12, 88, 39, 31, 6, 30,
-        19, 38, 74, 75, 2, 31, 67, 47, 47, 36, 20, 65, 17, 81, 38, 8, 95, 18, 70, 95,
-        65, 42, 88, 88, 5, 43, 76, 46, 17, 36, 74, 97, 86, 65, 38, 47, 41, 17, 7, 52,
-        98, 39, 59, 10, 50
-    ]
 
     # VEHICLES_SECTION (Kapasite ve Birim Maliyetlere Göre Gruplandırıldı)
-    vehicles = [
-        # Tip 1 (ID 0-2): Kapasite 130, Maliyet 77
-        *[Vehicle(vehicle_id=i, capacity=130, cost_per_km=1, fixed_cost=77, speed=1.0) for i in range(0, 3)],
-        # Tip 2 (ID 3-5): Kapasite 141, Maliyet 82
-        *[Vehicle(vehicle_id=i, capacity=141, cost_per_km=1, fixed_cost=82, speed=1.0) for i in range(3, 6)],
-        # Tip 3 (ID 6-8): Kapasite 154, Maliyet 88
-        *[Vehicle(vehicle_id=i, capacity=154, cost_per_km=1, fixed_cost=88, speed=1.0) for i in range(6, 9)],
-        # Tip 4 (ID 9-12): Kapasite 168, Maliyet 94
-        *[Vehicle(vehicle_id=i, capacity=168, cost_per_km=1, fixed_cost=94, speed=1.0) for i in range(9, 13)],
-        # Tip 5 (ID 13-16): Kapasite 183, Maliyet 100
-        *[Vehicle(vehicle_id=i, capacity=183, cost_per_km=1, fixed_cost=100, speed=1.0) for i in range(13, 17)],
-        # Tip 6 (ID 17-20): Kapasite 200, Maliyet 170
-        *[Vehicle(vehicle_id=i, capacity=200, cost_per_km=1, fixed_cost=170, speed=1.0) for i in range(17, 21)],
-        # Tip 7 (ID 21-24): Kapasite 218, Maliyet 113
-        *[Vehicle(vehicle_id=i, capacity=218, cost_per_km=1, fixed_cost=113, speed=1.0) for i in range(21, 25)],
-        # Tip 8 (ID 25-28): Kapasite 238, Maliyet 121
-        *[Vehicle(vehicle_id=i, capacity=238, cost_per_km=1, fixed_cost=121, speed=1.0) for i in range(25, 29)],
-        # Tip 9 (ID 29-31): Kapasite 259, Maliyet 129
-        *[Vehicle(vehicle_id=i, capacity=259, cost_per_km=1, fixed_cost=129, speed=1.0) for i in range(29, 32)]
-    ]
-
-    time_windows = [(0.0, float("inf")) for _ in coords]
-    service_times = [0.0 for _ in coords]
-
-    problem = HCVRPProblem(
-        coords=coords,
-        demands=demands,
-        vehicles=vehicles,
-        time_windows=time_windows,
-        service_times=service_times
-    )
     problem = load_hfvrp_instance_from_vrplib(DATA_FILE)
 
-    best_state = run_bloodhound_hcvrp(
-        problem=problem,
-        num_wolves=6,
-        num_hunts=15,
-        explore_iterations=150,
-        reserve_blood=2.5,
-        lambda_reg=1.0,
-        a=1.0,
-        b=2.0,
-        c=1.3,
-        b_par=1.2,
-        inherit_frac=0.85,
-        ruin_frac=0.10,
-        rr_repeats=5,
-        verbose=True,
-        random_seed=TEST_RANDOM_SEED,
-    )
+    best_state = run_bloodhound_hcvrp(problem = problem, **SEARCH_PARAMS)
 
     print("\n===== FINAL BEST =====")
     print("Instance:", getattr(problem, "original_vrplib_name", DATA_FILE.stem))
