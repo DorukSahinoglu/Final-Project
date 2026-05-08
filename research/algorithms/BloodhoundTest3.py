@@ -67,13 +67,13 @@ def _best_insertion_position_numba(route, customer, dist):
 @njit(cache=False)
 def _evaluate_route_kernel_numba(
         route, dist, demands, time_window_open, time_window_close, service_times,
-        capacity, cost_per_km, fixed_cost, speed, max_route_time_min, allow_capacity_overflow
+        capacity, cost_per_km, fixed_cost, speed, max_route_time_min
 ):
     load = _route_load_numba(route, demands)
     route_dist = _route_distance_numba(route, dist)
     cost = fixed_cost + route_dist * cost_per_km
 
-    if load > capacity and not allow_capacity_overflow:
+    if load > capacity:
         return False, load, route_dist, 0.0, cost
 
     current_time = 0.0
@@ -99,11 +99,50 @@ def _evaluate_route_kernel_numba(
     return True, load, route_dist, current_time, cost
 
 
+# SO: Soft-capacity versiyonu — kapasite aşımı False döndürmez, ceza ekler.
+# Zaman pencereleri hard kalır.
+@njit(cache=False)
+def _evaluate_route_kernel_soft_cap_numba(
+        route, dist, demands, time_window_open, time_window_close, service_times,
+        capacity, cost_per_km, fixed_cost, speed, max_route_time_min,
+        cap_penalty_weight   # SO: birim aşım başına ceza ağırlığı
+):
+    load = _route_load_numba(route, demands)
+    route_dist = _route_distance_numba(route, dist)
+    cost = fixed_cost + route_dist * cost_per_km
+
+    # SO: kapasite aşımı → False değil, ceza
+    if load > capacity:
+        cost += cap_penalty_weight * (load - capacity)
+
+    current_time = 0.0
+    for i in range(1, len(route) - 1):
+        prev_node = route[i - 1]
+        node = route[i]
+        current_time += _travel_time_numba(prev_node, node, dist, speed)
+        window_open = time_window_open[node]
+        window_close = time_window_close[node]
+        if current_time < window_open:
+            current_time = window_open
+        if current_time > window_close:
+            return False, load, route_dist, current_time, cost  # TW hâlâ hard
+        if node != 0:
+            current_time += service_times[node]
+
+    if len(route) >= 2:
+        current_time += _travel_time_numba(route[len(route) - 2], route[len(route) - 1], dist, speed)
+
+    if max_route_time_min >= 0.0 and current_time > max_route_time_min:
+        return False, load, route_dist, current_time, cost
+
+    return True, load, route_dist, current_time, cost
+
+
 @njit(cache=False)
 def _best_vehicle_type_for_route_numba(
         route, dist, demands, time_window_open, time_window_close, service_times,
         capacities, cost_per_km, fixed_costs, speeds, max_counts, usage_counts,
-        current_type_id, allow_current_type, max_route_time_min, allow_capacity_overflow
+        current_type_id, allow_current_type, max_route_time_min
 ):
     best_type_id = -1
     best_cost = 1e18
@@ -117,174 +156,22 @@ def _best_vehicle_type_for_route_numba(
                 continue
 
         route_ok, load, route_dist, route_time, cost = _evaluate_route_kernel_numba(
-            route,
-            dist,
-            demands,
-            time_window_open,
-            time_window_close,
-            service_times,
-            capacities[type_id],
-            cost_per_km[type_id],
-            fixed_costs[type_id],
-            speeds[type_id],
-            max_route_time_min,
-            allow_capacity_overflow,
+            route, dist, demands,
+            time_window_open, time_window_close, service_times,
+            capacities[type_id], cost_per_km[type_id], fixed_costs[type_id],
+            speeds[type_id], max_route_time_min,
         )
 
         if route_ok:
             if (cost < best_cost or
                     (cost == best_cost and route_dist < best_dist) or
-                    (cost == best_cost and route_dist == best_dist and capacities[type_id] < capacities[best_type_id])):
+                    (cost == best_cost and route_dist == best_dist
+                     and capacities[type_id] < capacities[best_type_id])):
                 best_type_id = type_id
                 best_cost = cost
                 best_dist = route_dist
 
     return best_type_id, best_cost, best_dist
-
-ALGO_CONFIG = {
-    "alpha_cost_weight": 0.65,
-    "alpha_blood_weight": 0.25,
-    "alpha_history_weight": 0.10,
-    "elite_pool_max_size": 4,
-    "elite_max_similarity": 0.90,
-    "regret3_probability": 0.50,
-    "destroy_prob_shaw": 0.45,
-    "destroy_prob_worst": 0.35,
-    "route_elimination_max_routes": 2,
-    "stagnation_hunt_limit": 4,
-    "stagnation_ruin_boost": 0.15,
-    "stagnation_ruin_cap": 0.45,
-    "oscillation_probability": 0.12,
-    "oscillation_capacity_penalty": 50.0,
-    "oscillation_capacity_power": 2.0,
-    "oscillation_max_route_overflow_ratio": 0.10,
-    "oscillation_max_total_overflow_ratio": 0.20,
-    "rebuild_oscillation_capacity_penalty": 20.0,
-    "rebuild_oscillation_capacity_power": 2.0,
-    "rebuild_oscillation_max_route_overflow_ratio": 0.22,
-    "rebuild_oscillation_max_total_overflow_ratio": 0.40,
-    "rebuild_oscillation_penalty_decay": 0.35,
-    "rebuild_oscillation_power_floor": 1.35,
-    "rebuild_oscillation_route_step": 0.04,
-    "rebuild_oscillation_total_step": 0.08,
-    "rebuild_oscillation_route_cap": 0.55,
-    "rebuild_oscillation_total_cap": 0.90,
-    "adaptive_small_route_count": 15,
-    "adaptive_medium_route_count": 25,
-    "adaptive_dense_route_threshold": 8.5,
-    "adaptive_medium_route_threshold": 6.5,
-    "adaptive_profiles": {
-        "dense": {
-            "regret_customer_limit": 12,
-            "regret_route_limit": 4,
-            "long_route_mode": True,
-            "intra_routes": 4,
-            "relocate_pairs": 4,
-            "two_opt_pairs": 3,
-            "cross_pairs": 2,
-            "max_cuts_per_route": 3,
-            "max_cross_starts": 3,
-            "path_customers": 8,
-            "path_steps": 2,
-            "ls_rounds": 1,
-            "route_elimination_tries": 1,
-        },
-        "medium": {
-            "regret_customer_limit": 18,
-            "regret_route_limit": 6,
-            "long_route_mode": False,
-            "intra_routes": 5,
-            "relocate_pairs": 6,
-            "two_opt_pairs": 4,
-            "cross_pairs": 3,
-            "max_cuts_per_route": 4,
-            "max_cross_starts": 4,
-            "path_customers": 12,
-            "path_steps": 4,
-            "ls_rounds": 2,
-            "route_elimination_tries": 1,
-        },
-        "light": {
-            "regret_customer_limit": 24,
-            "regret_route_limit": 8,
-            "long_route_mode": False,
-            "intra_routes": 6,
-            "relocate_pairs": 8,
-            "two_opt_pairs": 6,
-            "cross_pairs": 5,
-            "max_cuts_per_route": 5,
-            "max_cross_starts": 5,
-            "path_customers": 20,
-            "path_steps": 6,
-            "ls_rounds": 3,
-            "route_elimination_tries": 2,
-        },
-    },
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Gömülü dataset (X134-FSMD)
-# ─────────────────────────────────────────────────────────────────────────────
-# ==============================================================================
-#  VERİ YAPILARI
-# ==============================================================================
-
-@dataclass
-class Vehicle:
-    """VRPLIB parse için korunur. Solver VehicleType kullanır."""
-    vehicle_id:  int
-    capacity:    float
-    cost_per_km: float
-    fixed_cost:  float = 0.0
-    speed:       float = 1.0
-
-
-@dataclass
-class VehicleType:
-    """
-    Özdeş araçların temsil edildiği tip.
-    SolutionState.vehicle_ids artık bu tipin type_id'sini tutar.
-    Solver tüm kararları type_id üzerinden alır — tek tek araç ID'si kullanmaz.
-    """
-    type_id:     int
-    capacity:    float
-    cost_per_km: float
-    fixed_cost:  float = 0.0
-    speed:       float = 1.0
-    max_count:   int   = 1     # bu tipten kaç araç mevcut
-
-
-def _auto_build_vehicle_types(vehicles: List[Vehicle]) -> List[VehicleType]:
-    """
-    Vehicle listesini otomatik olarak VehicleType listesine dönüştürür.
-    (capacity, cost_per_km, fixed_cost, speed) dörtlüsü aynı olan araçlar
-    aynı tipte gruplanır. Kullanıcı tarafından çağrılmasına gerek yoktur —
-    HCVRPProblem.__post_init__ içinde otomatik çalışır.
-    """
-    groups: Dict[Tuple, int] = {}
-    order:  List[Tuple]      = []
-    for v in vehicles:
-        key = (v.capacity, v.cost_per_km, v.fixed_cost, v.speed)
-        if key not in groups:
-            groups[key] = 0
-            order.append(key)
-        groups[key] += 1
-    result: List[VehicleType] = []
-    for type_id, key in enumerate(order):
-        cap, cpm, fc, spd = key
-        result.append(VehicleType(
-            type_id=type_id, capacity=cap, cost_per_km=cpm,
-            fixed_cost=fc, speed=spd, max_count=groups[key]
-        ))
-    return result
-
-
-def _route_to_numpy(route: Route):
-    if np is None:
-        return route
-    if isinstance(route, np.ndarray):
-        return route
-    return np.asarray(route, dtype=np.int64)
 
 
 @njit(cache=False)
@@ -328,45 +215,189 @@ def _compute_route_centroid_numba(route, coords, depot_x, depot_y):
 def _select_candidate_route_indices_numba(customer_x, customer_y, centroid_x, centroid_y, max_candidates):
     n = len(centroid_x)
     distances = np.empty(n, dtype=np.float64)
-    indices = np.empty(n, dtype=np.int64)
+    indices   = np.empty(n, dtype=np.int64)
     for i in range(n):
         dx = customer_x - centroid_x[i]
         dy = customer_y - centroid_y[i]
         distances[i] = dx * dx + dy * dy
-        indices[i] = i
-    order = np.argsort(distances)
-    limit = min(max_candidates, n)
+        indices[i]   = i
+    order  = np.argsort(distances)
+    limit  = min(max_candidates, n)
     result = np.empty(limit, dtype=np.int64)
     for i in range(limit):
         result[i] = indices[order[i]]
     return result
 
 
+# ==============================================================================
+#  ALGO CONFIG
+# ==============================================================================
+
+ALGO_CONFIG = {
+    "alpha_cost_weight":                     0.60,
+    "alpha_blood_weight":                    0.25,
+    "alpha_history_weight":                  0.15,
+    "elite_pool_max_size":                   6,
+    "elite_max_similarity":                  0.90,
+    "regret3_probability":                   0.50,
+    "destroy_prob_shaw":                     0.45,
+    "destroy_prob_worst":                    0.35,
+    "route_elimination_max_routes":          2,
+    "stagnation_hunt_limit":                 4,
+    "stagnation_ruin_boost":                 0.15,
+    "stagnation_ruin_cap":                   0.45,
+    "adaptive_small_route_count":            15,
+    "adaptive_medium_route_count":           25,
+    "adaptive_dense_route_threshold":        8.5,
+    "adaptive_medium_route_threshold":       6.5,
+    "free_search_quality_update_interval":   10,
+    "destroy_bandit_eps":                    0.15,
+    "granular_neighbor_k":                   18,
+    "granular_route_boost_weight":           4.0,
+    "outlier_source_routes":                 6,
+    "outlier_target_routes":                 6,
+    "outlier_customers_per_route":           3,
+    "ejection_target_routes":                4,
+    "ejection_candidates_per_route":         2,
+    "bandit_reaction_factor":                0.30,
+    "bandit_reward_global_best":             12.0,
+    "bandit_reward_improving":               6.0,
+    "bandit_reward_feasible":                1.5,
+    "bandit_reward_fail":                    0.1,
+    # SO: Strategic Oscillation parametreleri
+    "so_cap_penalty_weight":                 300.0,   # birim kapasite aşımı başına ceza
+    "so_relax_period":                       25,      # RELAX fazında kalınacak adım sayısı
+    "so_enforce_period":                     25,      # ENFORCE fazında kalınacak adım sayısı
+    "adaptive_profiles": {
+        "dense": {
+            "regret_customer_limit":   12,
+            "regret_route_limit":       4,
+            "long_route_mode":       True,
+            "intra_routes":             4,
+            "relocate_pairs":           4,
+            "two_opt_pairs":            3,
+            "cross_pairs":              2,
+            "or_opt_pairs":             2,
+            "max_cuts_per_route":       3,
+            "max_cross_starts":         3,
+            "path_customers":           8,
+            "path_steps":               2,
+            "ls_rounds":                1,
+            "route_elimination_tries":  1,
+        },
+        "medium": {
+            "regret_customer_limit":   18,
+            "regret_route_limit":       6,
+            "long_route_mode":      False,
+            "intra_routes":             5,
+            "relocate_pairs":           6,
+            "two_opt_pairs":            4,
+            "cross_pairs":              3,
+            "or_opt_pairs":             3,
+            "max_cuts_per_route":       4,
+            "max_cross_starts":         4,
+            "path_customers":          12,
+            "path_steps":               4,
+            "ls_rounds":                2,
+            "route_elimination_tries":  1,
+        },
+        "light": {
+            "regret_customer_limit":   24,
+            "regret_route_limit":       8,
+            "long_route_mode":      False,
+            "intra_routes":             6,
+            "relocate_pairs":           8,
+            "two_opt_pairs":            6,
+            "cross_pairs":              5,
+            "or_opt_pairs":             5,
+            "max_cuts_per_route":       5,
+            "max_cross_starts":         5,
+            "path_customers":          20,
+            "path_steps":               6,
+            "ls_rounds":                3,
+            "route_elimination_tries":  2,
+        },
+    },
+}
+
+
+# ==============================================================================
+#  VERİ YAPILARI
+# ==============================================================================
+
+@dataclass
+class Vehicle:
+    vehicle_id:  int
+    capacity:    float
+    cost_per_km: float
+    fixed_cost:  float = 0.0
+    speed:       float = 1.0
+
+
+@dataclass
+class VehicleType:
+    type_id:     int
+    capacity:    float
+    cost_per_km: float
+    fixed_cost:  float = 0.0
+    speed:       float = 1.0
+    max_count:   int   = 1
+
+
+def _auto_build_vehicle_types(vehicles: List[Vehicle]) -> List[VehicleType]:
+    groups: Dict[Tuple, int] = {}
+    order:  List[Tuple]      = []
+    for v in vehicles:
+        key = (v.capacity, v.cost_per_km, v.fixed_cost, v.speed)
+        if key not in groups:
+            groups[key] = 0
+            order.append(key)
+        groups[key] += 1
+    result: List[VehicleType] = []
+    for type_id, key in enumerate(order):
+        cap, cpm, fc, spd = key
+        result.append(VehicleType(
+            type_id=type_id, capacity=cap, cost_per_km=cpm,
+            fixed_cost=fc, speed=spd, max_count=groups[key]
+        ))
+    return result
+
+
+def _route_to_numpy(route: Route):
+    if np is None:
+        return route
+    if isinstance(route, np.ndarray):
+        return route
+    return np.asarray(route, dtype=np.int64)
+
+
 @dataclass
 class SolutionState:
     routes:          Route_matrix
-    vehicle_ids:     List[int]   # her route için type_id (problem.vehicle_types'a index)
+    vehicle_ids:     List[int]
     route_loads:     List[float]
     route_distances: List[float]
     route_times:     List[float]
     route_costs:     List[float]
     total_cost:      float
-    search_cost:     float
     feasible:        bool
-    capacity_overflow: float = 0.0
+    # SO: Kapasite dahil TÜM hard kısıtların sağlandığını gösterir.
+    # RELAX fazında feasible=True ama hard_feasible=False olabilir.
+    # elite_pool ve best_state yalnız hard_feasible=True çözümleri kabul eder.
+    hard_feasible:   bool = field(default=True)
 
 
 @dataclass
 class HCVRPProblem:
     coords:        List[Point]
     demands:       List[float]
-    vehicles:      List[Vehicle]               # parse için korunur
+    vehicles:      List[Vehicle]
     time_windows:  Optional[List[Tuple[float, float]]] = None
     service_times: Optional[List[float]]               = None
-    dist:          Distance_matrix             = field(init=False)
-    n_nodes:       int                         = field(init=False)
-    customer_ids:  List[int]                   = field(init=False)
-    vehicle_types: List[VehicleType]           = field(init=False)  # otomatik üretilir
+    dist:          Distance_matrix                     = field(init=False)
+    n_nodes:       int                                 = field(init=False)
+    customer_ids:  List[int]                           = field(init=False)
+    vehicle_types: List[VehicleType]                   = field(init=False)
 
     def __post_init__(self):
         self.n_nodes      = len(self.coords)
@@ -390,25 +421,41 @@ class HCVRPProblem:
             raise ValueError("service_times uzunlugu node sayisi ile ayni olmali")
 
         self.dist = self.build_tsplib_euc2d_matrix(self.coords)
+        self.granular_neighbors = self._build_granular_neighbors(
+            int(ALGO_CONFIG["granular_neighbor_k"])
+        )
         if np is not None:
-            self.coords_np = np.asarray(self.coords, dtype=np.float64)
-            self.dist_np = np.asarray(self.dist, dtype=np.float64)
-            self.demands_np = np.asarray(self.demands, dtype=np.float64)
-            self.service_times_np = np.asarray(self.service_times, dtype=np.float64)
+            self.coords_np           = np.asarray(self.coords,        dtype=np.float64)
+            self.dist_np             = np.asarray(self.dist,          dtype=np.float64)
+            self.demands_np          = np.asarray(self.demands,       dtype=np.float64)
+            self.service_times_np    = np.asarray(self.service_times, dtype=np.float64)
             self.time_window_open_np = np.asarray([tw[0] for tw in self.time_windows], dtype=np.float64)
-            self.time_window_close_np = np.asarray([tw[1] for tw in self.time_windows], dtype=np.float64)
+            self.time_window_close_np= np.asarray([tw[1] for tw in self.time_windows], dtype=np.float64)
 
-        # ── Otomatik tip sınıflandırması ──────────────────────────────────────
-        # 999 özdeş araç → tek bir VehicleType(max_count=999)
-        # 3 farklı tip   → 3 VehicleType
         self.vehicle_types = _auto_build_vehicle_types(self.vehicles)
         self.max_vehicle_capacity = max(vt.capacity for vt in self.vehicle_types)
+
+        self._has_tight_time_windows = any(
+            tw[0] > 0.0 or tw[1] < float("inf") for tw in self.time_windows
+        )
+
         if np is not None:
-            self.vehicle_type_capacities_np = np.asarray([vt.capacity for vt in self.vehicle_types], dtype=np.float64)
+            self.vehicle_type_capacities_np  = np.asarray([vt.capacity    for vt in self.vehicle_types], dtype=np.float64)
             self.vehicle_type_cost_per_km_np = np.asarray([vt.cost_per_km for vt in self.vehicle_types], dtype=np.float64)
-            self.vehicle_type_fixed_costs_np = np.asarray([vt.fixed_cost for vt in self.vehicle_types], dtype=np.float64)
-            self.vehicle_type_speeds_np = np.asarray([vt.speed for vt in self.vehicle_types], dtype=np.float64)
-            self.vehicle_type_max_counts_np = np.asarray([vt.max_count for vt in self.vehicle_types], dtype=np.int64)
+            self.vehicle_type_fixed_costs_np = np.asarray([vt.fixed_cost  for vt in self.vehicle_types], dtype=np.float64)
+            self.vehicle_type_speeds_np      = np.asarray([vt.speed       for vt in self.vehicle_types], dtype=np.float64)
+            self.vehicle_type_max_counts_np  = np.asarray([vt.max_count   for vt in self.vehicle_types], dtype=np.int64)
+
+    def _build_granular_neighbors(self, k: int) -> List[List[int]]:
+        neighbors: List[List[int]] = [[] for _ in range(self.n_nodes)]
+        for customer in range(1, self.n_nodes):
+            ranked = sorted(
+                (self.dist[customer][other], other)
+                for other in range(1, self.n_nodes)
+                if other != customer
+            )
+            neighbors[customer] = [other for _, other in ranked[:k]]
+        return neighbors
 
     @staticmethod
     def build_tsplib_euc2d_matrix(coords: List[Point]) -> Distance_matrix:
@@ -457,11 +504,11 @@ class HCVRPProblem:
 def tsplib_distance_from_coords(a: Point, b: Point, edge_weight_type: str) -> float:
     x1, y1 = a; x2, y2 = b
     dx = x1 - x2; dy = y1 - y2
-    if edge_weight_type == "EUC_2D":  return int(math.sqrt(dx*dx + dy*dy) + 0.5)
-    if edge_weight_type == "CEIL_2D": return math.ceil(math.sqrt(dx*dx + dy*dy))
-    if edge_weight_type == "FLOOR_2D":return math.floor(math.sqrt(dx*dx + dy*dy))
-    if edge_weight_type == "MAN_2D":  return abs(dx) + abs(dy)
-    if edge_weight_type == "MAX_2D":  return max(abs(dx), abs(dy))
+    if edge_weight_type == "EUC_2D":   return int(math.sqrt(dx*dx + dy*dy) + 0.5)
+    if edge_weight_type == "CEIL_2D":  return math.ceil(math.sqrt(dx*dx + dy*dy))
+    if edge_weight_type == "FLOOR_2D": return math.floor(math.sqrt(dx*dx + dy*dy))
+    if edge_weight_type == "MAN_2D":   return abs(dx) + abs(dy)
+    if edge_weight_type == "MAX_2D":   return max(abs(dx), abs(dy))
     raise ValueError(f"Desteklenmeyen EDGE_WEIGHT_TYPE: {edge_weight_type}")
 
 
@@ -609,7 +656,7 @@ def load_hfvrp_instance_from_vrplib(
         benchmark_compatible_hfvrp_costs: bool = True
 ) -> "HCVRPProblem":
     path = Path(file_path)
-    if not path.exists():  raise FileNotFoundError(f"Dataset bulunamadi: {path}")
+    if not path.exists():        raise FileNotFoundError(f"Dataset bulunamadi: {path}")
     if path.stat().st_size == 0: raise ValueError(f"Dataset bos: {path}")
     return _parse_vrplib_lines(path.read_text(encoding="utf-8").splitlines(),
                                 path.stem, benchmark_compatible_hfvrp_costs)
@@ -624,6 +671,13 @@ def normalize_route(route: Route) -> Route:
         return route[:]
     return [0] + [n for n in route if n != 0] + [0]
 
+
+def _ensure_normalized(route: Route) -> Route:
+    if route and route[0] == 0 and route[-1] == 0 and 0 not in route[1:-1]:
+        return route
+    return [0] + [n for n in route if n != 0] + [0]
+
+
 def clone_routes(routes: Route_matrix) -> Route_matrix:
     return [r[:] for r in routes]
 
@@ -632,6 +686,22 @@ def extract_customers(routes: Route_matrix) -> List[int]:
 
 def route_core(route: Route) -> List[int]:
     return [n for n in route if n != 0]
+
+
+def internal_node_to_original(problem: HCVRPProblem, node: int) -> int:
+    if node == 0:
+        return int(getattr(problem, "original_vrplib_depot_id", 1))
+    mapping = getattr(problem, "original_to_internal_node", None)
+    if not mapping:
+        return node + 1
+    for original, internal in mapping.items():
+        if internal == node:
+            return int(original) + 1
+    return node + 1
+
+
+def route_to_original_ids(problem: HCVRPProblem, route: Route) -> Route:
+    return [internal_node_to_original(problem, n) for n in route]
 
 def route_has_duplicate_customer(route: Route) -> bool:
     customers = route_core(route)
@@ -658,19 +728,14 @@ def max_region_similarity_routes(routes: Route_matrix, closed_regions: List[Set[
 
 
 # ==============================================================================
-#  ARAÇ TİPİ ERİŞİMİ  (eski get_vehicle_by_id yerini alır)
+#  ARAÇ TİPİ ERİŞİMİ
 # ==============================================================================
 
 def get_vehicle_type_by_id(problem: HCVRPProblem, type_id: int) -> VehicleType:
-    """SolutionState.vehicle_ids'deki type_id'yi VehicleType objesine çevirir."""
     return problem.vehicle_types[type_id]
 
 
 def _type_usage_from_ids(vehicle_ids: List[int]) -> Dict[int, int]:
-    """
-    Mevcut bir çözümün vehicle_ids listesinden type_usage dict'ini türetir.
-    type_usage[type_id] = o tipten kaç rota açılmış
-    """
     usage: Dict[int, int] = {}
     for t_id in vehicle_ids:
         usage[t_id] = usage.get(t_id, 0) + 1
@@ -678,8 +743,87 @@ def _type_usage_from_ids(vehicle_ids: List[int]) -> Dict[int, int]:
 
 
 def _can_open_more(type_usage: Dict[int, int], vt: VehicleType) -> bool:
-    """Bu tipten bir tane daha açılabilir mi?"""
     return type_usage.get(vt.type_id, 0) < vt.max_count
+
+
+# ==============================================================================
+#  SO: STRATEGIC OSCILLATION CONTROLLER
+# ==============================================================================
+
+@dataclass
+class OscillationController:
+    """
+    Strategic Oscillation — sadece kapasite kısıtını soft yapar.
+    Zaman pencereleri her zaman hard kalır.
+
+    Faz mantığı:
+      ENFORCE → normal hard kapasite (orijinal davranış)
+      RELAX   → kapasite aşımı = ceza (infeasible bölge keşfi)
+
+    free_search_phase içinde her adımda .step() çağrılır;
+    periyot dolunca faz otomatik değişir.
+    """
+    cap_penalty_weight: float = field(default_factory=lambda: float(ALGO_CONFIG["so_cap_penalty_weight"]))
+    relax_period:       int   = field(default_factory=lambda: int(ALGO_CONFIG["so_relax_period"]))
+    enforce_period:     int   = field(default_factory=lambda: int(ALGO_CONFIG["so_enforce_period"]))
+    phase:              str   = field(default="ENFORCE", init=False)
+    _steps:             int   = field(default=0,         init=False, repr=False)
+    _relax_entered:     int   = field(default=0,         init=False, repr=False)  # istatistik
+    _enforce_entered:   int   = field(default=0,         init=False, repr=False)  # istatistik
+
+    def is_relax(self) -> bool:
+        return self.phase == "RELAX"
+
+    def set_phase(self, phase: str) -> None:
+        """Faz zorla değiştirilir; sayaç sıfırlanır."""
+        if phase not in ("RELAX", "ENFORCE"):
+            raise ValueError(f"Geçersiz faz: {phase}")
+        self.phase  = phase
+        self._steps = 0
+        if phase == "RELAX":
+            self._relax_entered += 1
+        else:
+            self._enforce_entered += 1
+
+    def toggle(self) -> None:
+        """Fazı tersine çevirir."""
+        new_phase = "RELAX" if self.phase == "ENFORCE" else "ENFORCE"
+        self.set_phase(new_phase)
+
+    def step(self) -> None:
+        """
+        free_search_phase her iterasyonunun başında çağrılır.
+        Aktif periyot dolduğunda faz otomatik değişir.
+        """
+        self._steps += 1
+        period = self.relax_period if self.phase == "RELAX" else self.enforce_period
+        if self._steps >= period:
+            self.toggle()
+
+    def stats(self) -> Dict[str, object]:
+        return {
+            "phase":           self.phase,
+            "steps_in_phase":  self._steps,
+            "relax_entered":   self._relax_entered,
+            "enforce_entered": self._enforce_entered,
+            "cap_pw":          self.cap_penalty_weight,
+        }
+
+
+# SO: Modül düzeyinde aktif oscillation — None ise devre dışı (hard constraints).
+# free_search_phase sırasında set_active_oscillation() ile aktifleştirilir,
+# hunt ve LS aşamalarında None yapılır.
+_ACTIVE_OSCILLATION: Optional[OscillationController] = None
+
+
+def set_active_oscillation(ctrl: Optional[OscillationController]) -> None:
+    """Aktif oscillation controller'ı ayarla (None → hard mod)."""
+    global _ACTIVE_OSCILLATION
+    _ACTIVE_OSCILLATION = ctrl
+
+
+def get_active_oscillation() -> Optional[OscillationController]:
+    return _ACTIVE_OSCILLATION
 
 
 # ==============================================================================
@@ -689,33 +833,54 @@ def _can_open_more(type_usage: Dict[int, int], vt: VehicleType) -> bool:
 def evaluate_route_for_vehicle(
         problem: HCVRPProblem,
         route: Route,
-        vehicle: VehicleType,          # duck typing: capacity/cost_per_km/fixed_cost/speed
-        allow_capacity_overflow: bool = False
+        vehicle: VehicleType
 ) -> Tuple[bool, float, float, float, float]:
-    nr           = normalize_route(route)
+    nr  = _ensure_normalized(route)
+    # SO: aktif oscillation varsa ve RELAX fazındaysa soft cap kullan
+    osc      = _ACTIVE_OSCILLATION
+    use_soft = (osc is not None and osc.is_relax())
+
     if NUMBA_AVAILABLE and np is not None:
         nr_np = _route_to_numpy(nr)
         max_route_time_min = getattr(problem, "max_route_time_min", None)
-        route_ok, load, dist, route_time, cost = _evaluate_route_kernel_numba(
-            nr_np,
-            problem.dist_np,
-            problem.demands_np,
-            problem.time_window_open_np,
-            problem.time_window_close_np,
-            problem.service_times_np,
-            vehicle.capacity,
-            vehicle.cost_per_km,
-            vehicle.fixed_cost,
-            vehicle.speed,
-            -1.0 if max_route_time_min is None else float(max_route_time_min),
-            allow_capacity_overflow,
-        )
+        mrm = -1.0 if max_route_time_min is None else float(max_route_time_min)
+
+        if use_soft:
+            # SO: soft-cap numba kernel
+            route_ok, load, dist, route_time, cost = _evaluate_route_kernel_soft_cap_numba(
+                nr_np,
+                problem.dist_np, problem.demands_np,
+                problem.time_window_open_np, problem.time_window_close_np,
+                problem.service_times_np,
+                vehicle.capacity, vehicle.cost_per_km, vehicle.fixed_cost, vehicle.speed,
+                mrm,
+                osc.cap_penalty_weight,
+            )
+        else:
+            route_ok, load, dist, route_time, cost = _evaluate_route_kernel_numba(
+                nr_np,
+                problem.dist_np, problem.demands_np,
+                problem.time_window_open_np, problem.time_window_close_np,
+                problem.service_times_np,
+                vehicle.capacity, vehicle.cost_per_km, vehicle.fixed_cost, vehicle.speed,
+                mrm,
+            )
         return bool(route_ok), float(load), float(dist), float(route_time), float(cost)
-    load         = problem.route_load(nr)
-    dist         = problem.route_distance(nr)
-    cost         = vehicle.fixed_cost + dist * vehicle.cost_per_km
-    if load > vehicle.capacity and not allow_capacity_overflow:
-        return False, load, dist, 0.0, cost
+
+    # Python yolu
+    load = problem.route_load(nr)
+    dist = problem.route_distance(nr)
+    cost = vehicle.fixed_cost + dist * vehicle.cost_per_km
+
+    if use_soft:
+        # SO: kapasite aşımı → ceza, False dönme
+        if load > vehicle.capacity:
+            cost += osc.cap_penalty_weight * (load - vehicle.capacity)
+    else:
+        if load > vehicle.capacity:
+            return False, load, dist, 0.0, cost
+
+    # Zaman pencereleri her zaman hard
     current_time = 0.0
     for i in range(1, len(nr) - 1):
         prev_node = nr[i - 1]; node = nr[i]
@@ -735,39 +900,31 @@ def evaluate_route_for_vehicle(
 def evaluate_solution(
         problem: HCVRPProblem,
         routes: Route_matrix,
-        vehicle_ids: List[int],       # type_id listesi
-        infeasible_penalty: float = 1e12,
-        allow_capacity_infeasible: bool = False,
-        capacity_penalty_coeff: Optional[float] = None,
-        capacity_penalty_power: Optional[float] = None,
-        max_route_overflow_ratio: Optional[float] = None,
-        max_total_overflow_ratio: Optional[float] = None
+        vehicle_ids: List[int],
+        infeasible_penalty: float = 1e12
 ) -> "SolutionState":
     if len(routes) != len(vehicle_ids):
         raise ValueError("Routes ve vehicle_ids uzunluğu aynı olmalı")
+
     normalized_routes = [normalize_route(r) for r in routes]
     normalized_route_arrays = None
     covered_customers = None
     if NUMBA_AVAILABLE and np is not None:
         normalized_route_arrays = [_route_to_numpy(route) for route in normalized_routes]
         covered_customers = np.zeros(problem.n_nodes, dtype=np.uint8)
+
+    # SO: aktif oscillation → soft cap ağırlığı belirle
+    _osc  = _ACTIVE_OSCILLATION
+    cap_pw = _osc.cap_penalty_weight if (_osc is not None and _osc.is_relax()) else 0.0
+    max_route_time_min = getattr(problem, "max_route_time_min", None)
+    mrm = -1.0 if max_route_time_min is None else float(max_route_time_min)
+
     route_loads:     List[float] = []
     route_distances: List[float] = []
     route_times:     List[float] = []
     route_costs:     List[float] = []
-    total_capacity_overflow = 0.0
     feasible = True
 
-    if capacity_penalty_coeff is None:
-        capacity_penalty_coeff = float(ALGO_CONFIG["oscillation_capacity_penalty"])
-    if capacity_penalty_power is None:
-        capacity_penalty_power = float(ALGO_CONFIG["oscillation_capacity_power"])
-    if max_route_overflow_ratio is None:
-        max_route_overflow_ratio = float(ALGO_CONFIG["oscillation_max_route_overflow_ratio"])
-    if max_total_overflow_ratio is None:
-        max_total_overflow_ratio = float(ALGO_CONFIG["oscillation_max_total_overflow_ratio"])
-
-    # Tip kapasitesi kontrolü (max_count aşımı)
     type_counts = Counter(vehicle_ids)
     for type_id, count in type_counts.items():
         if type_id < 0 or type_id >= len(problem.vehicle_types):
@@ -779,44 +936,44 @@ def evaluate_solution(
         if v_id < 0 or v_id >= len(problem.vehicle_types):
             raise ValueError(f"Gecersiz type_id: {v_id}")
         vt = problem.vehicle_types[v_id]
+
         if NUMBA_AVAILABLE and np is not None:
             route_arr = normalized_route_arrays[route_idx]
             if _route_has_duplicate_customer_numba(route_arr, problem.n_nodes):
                 feasible = False
             _mark_covered_customers_numba(route_arr, covered_customers)
-            max_route_time_min = getattr(problem, "max_route_time_min", None)
-            route_ok, load, dist, route_time, cost = _evaluate_route_kernel_numba(
-                route_arr,
-                problem.dist_np,
-                problem.demands_np,
-                problem.time_window_open_np,
-                problem.time_window_close_np,
-                problem.service_times_np,
-                vt.capacity,
-                vt.cost_per_km,
-                vt.fixed_cost,
-                vt.speed,
-                -1.0 if max_route_time_min is None else float(max_route_time_min),
-                allow_capacity_infeasible,
-            )
-            route_ok = bool(route_ok)
-            load = float(load)
-            dist = float(dist)
+
+            # SO: RELAX modunda soft-cap kernel
+            if cap_pw > 0.0:
+                route_ok, load, dist, route_time, cost = _evaluate_route_kernel_soft_cap_numba(
+                    route_arr,
+                    problem.dist_np, problem.demands_np,
+                    problem.time_window_open_np, problem.time_window_close_np,
+                    problem.service_times_np,
+                    vt.capacity, vt.cost_per_km, vt.fixed_cost, vt.speed,
+                    mrm, cap_pw,
+                )
+            else:
+                route_ok, load, dist, route_time, cost = _evaluate_route_kernel_numba(
+                    route_arr,
+                    problem.dist_np, problem.demands_np,
+                    problem.time_window_open_np, problem.time_window_close_np,
+                    problem.service_times_np,
+                    vt.capacity, vt.cost_per_km, vt.fixed_cost, vt.speed,
+                    mrm,
+                )
+            route_ok   = bool(route_ok)
+            load       = float(load)
+            dist       = float(dist)
             route_time = float(route_time)
-            cost = float(cost)
-        elif route_has_duplicate_customer(route):
+            cost       = float(cost)
+        else:
+            if route_has_duplicate_customer(route):
+                feasible = False
+            route_ok, load, dist, route_time, cost = evaluate_route_for_vehicle(problem, route, vt)
+
+        if not route_ok:
             feasible = False
-            route_ok, load, dist, route_time, cost = evaluate_route_for_vehicle(
-                problem, route, vt, allow_capacity_overflow=allow_capacity_infeasible
-            )
-        overflow = max(0.0, load - vt.capacity)
-        total_capacity_overflow += overflow
-        if overflow > 0.0:
-            if not allow_capacity_infeasible:
-                feasible = False
-            elif overflow > max_route_overflow_ratio * max(vt.capacity, 1.0):
-                feasible = False
-        if not route_ok: feasible = False
         route_loads.append(load); route_distances.append(dist)
         route_times.append(route_time); route_costs.append(cost)
 
@@ -827,28 +984,29 @@ def evaluate_solution(
         feasible = False
 
     total_cost = sum(route_costs)
-    search_cost = total_cost
-    if allow_capacity_infeasible and total_capacity_overflow > 0.0:
-        search_cost += capacity_penalty_coeff * (total_capacity_overflow ** capacity_penalty_power)
-        if total_capacity_overflow > max_total_overflow_ratio * max(problem.max_vehicle_capacity, 1.0) * max(1, len(routes)):
-            feasible = False
-    if not feasible:
-        if not (allow_capacity_infeasible and total_capacity_overflow > 0.0):
-            search_cost += infeasible_penalty
-        elif total_capacity_overflow <= 0.0:
-            search_cost += infeasible_penalty
+    if not feasible: total_cost += infeasible_penalty
+
+    # SO: hard_feasible — kapasite dahil TÜM hard kısıtlar (oscillation bağımsız).
+    # RELAX modunda feasible=True olabilir ama cap aşımı varsa hard_feasible=False.
+    hard_feasible = feasible
+    if hard_feasible and cap_pw > 0.0:
+        for rl, v_id_chk in zip(route_loads, vehicle_ids):
+            if 0 <= v_id_chk < len(problem.vehicle_types):
+                if rl > problem.vehicle_types[v_id_chk].capacity + 1e-9:
+                    hard_feasible = False
+                    break
 
     return SolutionState(
         routes=normalized_routes, vehicle_ids=vehicle_ids[:],
         route_loads=route_loads, route_distances=route_distances,
         route_times=route_times, route_costs=route_costs,
-        total_cost=total_cost, search_cost=search_cost,
-        capacity_overflow=total_capacity_overflow, feasible=feasible and total_capacity_overflow <= 1e-9
+        total_cost=total_cost, feasible=feasible,
+        hard_feasible=hard_feasible,   # SO
     )
 
 
 # ==============================================================================
-#  ARAÇ ATAma  (tüm fonksiyonlar type_usage: Dict[int,int] kullanır)
+#  ARAÇ ATAma (her zaman hard cap — _ACTIVE_OSCILLATION None olduğunda çağrılır)
 # ==============================================================================
 
 def cheapest_feasible_vehicle_type(
@@ -857,11 +1015,6 @@ def cheapest_feasible_vehicle_type(
         type_usage: Dict[int, int],
         route: Optional[Route] = None
 ) -> Optional[int]:
-    """
-    Verilen yük için uygun, hâlâ açılabilecek en ucuz araç tipini döndürür.
-    Eski cheapest_feasible_unused_vehicle'ın yerine geçer.
-    999 araç yerine sadece tip sayısı kadar döngü döner.
-    """
     candidates = []
     for vt in problem.vehicle_types:
         if not _can_open_more(type_usage, vt): continue
@@ -871,8 +1024,8 @@ def cheapest_feasible_vehicle_type(
             if not route_ok: continue
         candidates.append(vt)
     if not candidates: return None
-    candidates.sort(key=lambda v: (v.fixed_cost, v.cost_per_km, v.capacity))
-    return candidates[0].type_id
+    best = min(candidates, key=lambda v: (v.fixed_cost, v.cost_per_km, v.capacity))
+    return best.type_id
 
 
 def assign_best_feasible_vehicle_for_tour(
@@ -880,30 +1033,25 @@ def assign_best_feasible_vehicle_for_tour(
         route: Route,
         type_usage: Dict[int, int]
 ) -> Optional[int]:
-    """Boş bir rota için en uygun aracı atar. type_usage'a göre mevcut slotları kontrol eder."""
     if NUMBA_AVAILABLE and np is not None:
         usage_counts = np.zeros(len(problem.vehicle_types), dtype=np.int64)
         for type_id, count in type_usage.items():
             usage_counts[type_id] = count
+        # Araç ataması her zaman hard — numba kernel doğrudan çağrılır
         best_type_id, _, _ = _best_vehicle_type_for_route_numba(
             _route_to_numpy(normalize_route(route)),
-            problem.dist_np,
-            problem.demands_np,
-            problem.time_window_open_np,
-            problem.time_window_close_np,
+            problem.dist_np, problem.demands_np,
+            problem.time_window_open_np, problem.time_window_close_np,
             problem.service_times_np,
-            problem.vehicle_type_capacities_np,
-            problem.vehicle_type_cost_per_km_np,
-            problem.vehicle_type_fixed_costs_np,
-            problem.vehicle_type_speeds_np,
-            problem.vehicle_type_max_counts_np,
-            usage_counts,
-            -1,
-            False,
-            -1.0 if getattr(problem, "max_route_time_min", None) is None else float(problem.max_route_time_min),
-            False,
+            problem.vehicle_type_capacities_np, problem.vehicle_type_cost_per_km_np,
+            problem.vehicle_type_fixed_costs_np, problem.vehicle_type_speeds_np,
+            problem.vehicle_type_max_counts_np, usage_counts,
+            -1, False,
+            -1.0 if getattr(problem, "max_route_time_min", None) is None
+                 else float(problem.max_route_time_min),
         )
         return None if best_type_id < 0 else int(best_type_id)
+
     load = problem.route_load(route)
     candidates = []
     for vt in problem.vehicle_types:
@@ -912,76 +1060,52 @@ def assign_best_feasible_vehicle_for_tour(
         route_ok, _, rd, _, rc = evaluate_route_for_vehicle(problem, route, vt)
         if route_ok: candidates.append((rc, rd, vt.capacity, vt.type_id))
     if not candidates: return None
-    candidates.sort()
-    return candidates[0][3]
+    return min(candidates)[3]
 
 
 def assign_best_vehicle_for_existing_route(
         problem: HCVRPProblem,
         route: Route,
         current_type_id: int,
-        type_usage: Dict[int, int],
-        allow_capacity_overflow: bool = False
-) -> Optional[Tuple[int, float, float, float]]:
-    """
-    Mevcut bir rota için en iyi araç tipini seçer.
-    Mevcut tipin slotu zaten kullanımda sayılır — kendi slotunu sayar.
-    Başka bir tipe geçmek için o tipte boş slot olması gerekir.
-    """
+        type_usage: Dict[int, int]
+) -> Optional[Tuple[int, float, float]]:
     if NUMBA_AVAILABLE and np is not None:
         usage_counts = np.zeros(len(problem.vehicle_types), dtype=np.int64)
         for type_id, count in type_usage.items():
             usage_counts[type_id] = count
         best_type_id, best_cost, best_dist = _best_vehicle_type_for_route_numba(
             _route_to_numpy(normalize_route(route)),
-            problem.dist_np,
-            problem.demands_np,
-            problem.time_window_open_np,
-            problem.time_window_close_np,
+            problem.dist_np, problem.demands_np,
+            problem.time_window_open_np, problem.time_window_close_np,
             problem.service_times_np,
-            problem.vehicle_type_capacities_np,
-            problem.vehicle_type_cost_per_km_np,
-            problem.vehicle_type_fixed_costs_np,
-            problem.vehicle_type_speeds_np,
-            problem.vehicle_type_max_counts_np,
-            usage_counts,
-            current_type_id,
-            True,
-            -1.0 if getattr(problem, "max_route_time_min", None) is None else float(problem.max_route_time_min),
-            allow_capacity_overflow,
+            problem.vehicle_type_capacities_np, problem.vehicle_type_cost_per_km_np,
+            problem.vehicle_type_fixed_costs_np, problem.vehicle_type_speeds_np,
+            problem.vehicle_type_max_counts_np, usage_counts,
+            current_type_id, True,
+            -1.0 if getattr(problem, "max_route_time_min", None) is None
+                 else float(problem.max_route_time_min),
         )
         if best_type_id < 0:
             return None
-        best_capacity = problem.vehicle_types[int(best_type_id)].capacity
-        route_load = problem.route_load(route)
-        return int(best_type_id), float(best_cost), float(best_dist), max(0.0, route_load - best_capacity)
+        return int(best_type_id), float(best_cost), float(best_dist)
+
     candidates = []
     for vt in problem.vehicle_types:
-        if vt.type_id == current_type_id:
-            pass  # kendi tipimiz, slot zaten sayılı
-        else:
+        if vt.type_id != current_type_id:
             if not _can_open_more(type_usage, vt): continue
-        route_ok, route_load, rd, _, rc = evaluate_route_for_vehicle(
-            problem, route, vt, allow_capacity_overflow=allow_capacity_overflow
-        )
-        if route_ok:
-            overflow = max(0.0, route_load - vt.capacity)
-            candidates.append((rc, rd, vt.capacity, vt.type_id, overflow))
+        route_ok, _, rd, _, rc = evaluate_route_for_vehicle(problem, route, vt)
+        if route_ok: candidates.append((rc, rd, vt.capacity, vt.type_id))
     if not candidates: return None
-    candidates.sort()
-    bc, bd, _, bt, overflow = candidates[0]
-    return bt, bc, bd, overflow
+    bc, bd, _, bt = min(candidates)
+    return bt, bc, bd
 
 
 def can_append_customer_to_route(
-        problem: HCVRPProblem,
-        route: Route,
-        customer: int,
-        vehicle: VehicleType
+        problem: HCVRPProblem, route: Route, customer: int, vehicle: VehicleType
 ) -> bool:
     if problem.route_load(normalize_route(route)) + problem.demands[customer] > vehicle.capacity:
         return False
-    nr = normalize_route(route)
+    nr  = normalize_route(route)
     pos = best_append_position_by_distance(problem, nr, customer)
     candidate = nr[:]
     candidate.insert(pos, customer)
@@ -992,7 +1116,7 @@ def can_append_customer_to_route(
 def best_append_position_by_distance(
         problem: HCVRPProblem, route: Route, customer: int
 ) -> int:
-    nr = normalize_route(route)
+    nr = _ensure_normalized(route)
     best_pos = 1; best_delta = float("inf")
     for i in range(len(nr) - 1):
         a = nr[i]; b = nr[i + 1]
@@ -1009,7 +1133,12 @@ def find_best_route_insertion(
         customer: int
 ) -> Optional[Tuple]:
     best_choice = None
-    for r_idx, route in enumerate(routes):
+    route_centroids = compute_route_centroids(problem, routes) if routes else []
+    for r_idx in select_candidate_route_indices(
+            problem, routes, customer,
+            max_candidates=max(1, min(len(routes), int(ALGO_CONFIG["granular_neighbor_k"]) // 2 or 1)),
+            route_centroids=route_centroids) if routes else []:
+        route = routes[r_idx]
         current_type_id = vehicle_ids[r_idx]
         current_type    = get_vehicle_type_by_id(problem, current_type_id)
         route_ok, _, _, _, current_cost = evaluate_route_for_vehicle(problem, route, current_type)
@@ -1020,7 +1149,7 @@ def find_best_route_insertion(
             problem, candidate_route, current_type_id=current_type_id, type_usage=type_usage
         )
         if best_vehicle is None: continue
-        new_type_id, new_cost, _, _ = best_vehicle
+        new_type_id, new_cost, _ = best_vehicle
         delta_cost = new_cost - current_cost
         choice_key = (delta_cost, new_cost, r_idx, pos, new_type_id)
         if best_choice is None or choice_key < best_choice[0]:
@@ -1047,9 +1176,9 @@ def generate_feasible_solution(
         else:
             random.shuffle(customers)
 
-        routes:      Route_matrix    = []
-        vehicle_ids: List[int]       = []
-        type_usage:  Dict[int, int]  = {}
+        routes:      Route_matrix   = []
+        vehicle_ids: List[int]      = []
+        type_usage:  Dict[int, int] = {}
         success = True
 
         for customer in customers:
@@ -1061,7 +1190,7 @@ def generate_feasible_solution(
                 r_idx, pos, new_type_id, _ = best_choice
                 old_type_id = vehicle_ids[r_idx]
                 nr = normalize_route(routes[r_idx]); nr.insert(pos, customer)
-                routes[r_idx]     = nr
+                routes[r_idx]      = nr
                 vehicle_ids[r_idx] = new_type_id
                 if old_type_id != new_type_id:
                     type_usage[old_type_id] -= 1
@@ -1111,14 +1240,16 @@ class Wolf:
             routes=clone_routes(state.routes), vehicle_ids=state.vehicle_ids[:],
             route_loads=state.route_loads[:], route_distances=state.route_distances[:],
             route_times=state.route_times[:], route_costs=state.route_costs[:],
-            total_cost=state.total_cost, search_cost=state.search_cost,
-            capacity_overflow=state.capacity_overflow, feasible=state.feasible
+            total_cost=state.total_cost, feasible=state.feasible,
+            hard_feasible=state.hard_feasible,   # SO
         )
 
     def update_if_better(self, candidate_state: "SolutionState"):
-        if candidate_state.search_cost < self.state.search_cost:
+        if candidate_state.total_cost < self.state.total_cost:
             self.state = self.clone_state(candidate_state)
-        if candidate_state.feasible and candidate_state.total_cost < self.best_state.total_cost:
+        # SO: best_state yalnız hard_feasible (kapasite dahil) çözümler alır.
+        # RELAX sırasında üretilen cap-ihlalli çözümler best_state'e girmez.
+        if candidate_state.hard_feasible and candidate_state.total_cost < self.best_state.total_cost:
             self.best_state = self.clone_state(candidate_state)
 
 
@@ -1143,13 +1274,13 @@ def minmax_normalize_values(values: List[float]) -> List[float]:
     return [(v - v_min) / (v_max - v_min) for v in values]
 
 def update_population_quality_scores(wolves: List[Wolf]):
-    cq = minmax_normalize_costs_to_quality([w.state.search_cost for w in wolves])
+    cq = minmax_normalize_costs_to_quality([w.state.total_cost for w in wolves])
     for w, q in zip(wolves, cq): w.quality_score = q
     bq = minmax_normalize_costs_to_quality([w.best_state.total_cost for w in wolves])
     for w, q in zip(wolves, bq): w.best_quality_score = q
 
 def population_cost_stats(wolves: List[Wolf]) -> Tuple[float, float, float]:
-    costs = [w.state.search_cost for w in wolves]
+    costs = [w.state.total_cost for w in wolves]
     return min(costs), sum(costs) / len(costs), max(costs)
 
 def robust_scale_from_history(values: List[float], fallback: float = 1.0) -> float:
@@ -1169,10 +1300,9 @@ def clone_solution_state(state: "SolutionState") -> "SolutionState":
         routes=clone_routes(state.routes), vehicle_ids=state.vehicle_ids[:],
         route_loads=state.route_loads[:], route_distances=state.route_distances[:],
         route_times=state.route_times[:], route_costs=state.route_costs[:],
-        total_cost=state.total_cost, search_cost=state.search_cost,
-        capacity_overflow=state.capacity_overflow, feasible=state.feasible
+        total_cost=state.total_cost, feasible=state.feasible,
+        hard_feasible=state.hard_feasible,   # SO
     )
-
 
 def clone_state_with_updated_route(
         state: "SolutionState",
@@ -1184,14 +1314,16 @@ def clone_state_with_updated_route(
         route_cost: float
 ) -> "SolutionState":
     candidate = clone_solution_state(state)
-    candidate.routes[route_idx] = normalize_route(new_route)
-    candidate.route_loads[route_idx] = route_load
+    candidate.routes[route_idx]          = normalize_route(new_route)
+    candidate.route_loads[route_idx]     = route_load
     candidate.route_distances[route_idx] = route_dist
-    candidate.route_times[route_idx] = route_time
-    candidate.route_costs[route_idx] = route_cost
+    candidate.route_times[route_idx]     = route_time
+    candidate.route_costs[route_idx]     = route_cost
     candidate.total_cost = state.total_cost - state.route_costs[route_idx] + route_cost
-    candidate.search_cost = state.search_cost - state.route_costs[route_idx] + route_cost
-    candidate.feasible = state.feasible
+    candidate.feasible   = state.feasible
+    # SO: hard_feasible da devralınır (rota güncellemesi sonrası yeniden hesaplamak gerekirse
+    # tam evaluate_solution çağrılmalı; burada incremental update için orijinal değer korunur)
+    candidate.hard_feasible = state.hard_feasible
     return candidate
 
 def state_edge_similarity(a: "SolutionState", b: "SolutionState") -> float:
@@ -1211,7 +1343,8 @@ def update_elite_pool(
     if max_size is None:       max_size       = int(ALGO_CONFIG["elite_pool_max_size"])
     if max_similarity is None: max_similarity = float(ALGO_CONFIG["elite_max_similarity"])
     combined = [clone_solution_state(s) for s in elite_pool]
-    combined.extend(clone_solution_state(s) for s in candidate_states if s.feasible)
+    # SO: elite pool'a yalnız hard_feasible çözümler girer
+    combined.extend(clone_solution_state(s) for s in candidate_states if s.hard_feasible)
     combined.sort(key=lambda s: s.total_cost)
     new_pool: List["SolutionState"] = []
     for candidate in combined:
@@ -1242,78 +1375,74 @@ def remove_empty_routes(
     return new_routes, new_vehicle_ids
 
 
-def _capacity_overflow_penalty(overflow: float, coeff: float, power: float) -> float:
-    if overflow <= 1e-9:
-        return 0.0
-    return coeff * (overflow ** power)
+# ==============================================================================
+#  DESTROY BANDIT
+# ==============================================================================
 
+class DestroyBandit:
+    _MODES: Tuple[str, ...] = ("shaw", "worst", "route")
 
-def _soft_capacity_eval_kwargs(enabled: bool, mode: str = "free") -> Dict[str, float]:
-    if not enabled:
-        return {}
-    if mode == "rebuild":
-        return {
-            "allow_capacity_infeasible": True,
-            "capacity_penalty_coeff": float(ALGO_CONFIG["rebuild_oscillation_capacity_penalty"]),
-            "capacity_penalty_power": float(ALGO_CONFIG["rebuild_oscillation_capacity_power"]),
-            "max_route_overflow_ratio": float(ALGO_CONFIG["rebuild_oscillation_max_route_overflow_ratio"]),
-            "max_total_overflow_ratio": float(ALGO_CONFIG["rebuild_oscillation_max_total_overflow_ratio"]),
-        }
-    return {
-        "allow_capacity_infeasible": True,
-        "capacity_penalty_coeff": float(ALGO_CONFIG["oscillation_capacity_penalty"]),
-        "capacity_penalty_power": float(ALGO_CONFIG["oscillation_capacity_power"]),
-        "max_route_overflow_ratio": float(ALGO_CONFIG["oscillation_max_route_overflow_ratio"]),
-        "max_total_overflow_ratio": float(ALGO_CONFIG["oscillation_max_total_overflow_ratio"]),
-    }
+    def __init__(self, eps: float = 0.15):
+        self.eps = eps
+        self.reaction = float(ALGO_CONFIG["bandit_reaction_factor"])
+        self._scores: Dict[str, float] = {m: 1.0 for m in self._MODES}
+        self._counts: Dict[str, int]   = {m: 1   for m in self._MODES}
+        self.last_mode: Optional[str] = None
 
+    def select(self) -> str:
+        if random.random() < self.eps:
+            self.last_mode = random.choice(self._MODES)
+            return self.last_mode
+        total = sum(max(1e-9, self._scores[m]) for m in self._MODES)
+        roll = random.random() * total
+        acc = 0.0
+        for mode in self._MODES:
+            acc += max(1e-9, self._scores[mode])
+            if roll <= acc:
+                self.last_mode = mode
+                return mode
+        self.last_mode = self._MODES[-1]
+        return self._MODES[-1]
 
-def _rebuild_soft_eval_kwargs(stagnation_level: int = 0) -> Dict[str, float]:
-    base_coeff = float(ALGO_CONFIG["rebuild_oscillation_capacity_penalty"])
-    base_power = float(ALGO_CONFIG["rebuild_oscillation_capacity_power"])
-    base_route = float(ALGO_CONFIG["rebuild_oscillation_max_route_overflow_ratio"])
-    base_total = float(ALGO_CONFIG["rebuild_oscillation_max_total_overflow_ratio"])
-    decay = float(ALGO_CONFIG["rebuild_oscillation_penalty_decay"])
-    power_floor = float(ALGO_CONFIG["rebuild_oscillation_power_floor"])
-    route_step = float(ALGO_CONFIG["rebuild_oscillation_route_step"])
-    total_step = float(ALGO_CONFIG["rebuild_oscillation_total_step"])
-    route_cap = float(ALGO_CONFIG["rebuild_oscillation_route_cap"])
-    total_cap = float(ALGO_CONFIG["rebuild_oscillation_total_cap"])
-    level = max(0, stagnation_level)
-    return {
-        "allow_capacity_infeasible": True,
-        "capacity_penalty_coeff": max(1.0, base_coeff / (1.0 + decay * level)),
-        "capacity_penalty_power": max(power_floor, base_power - 0.12 * level),
-        "max_route_overflow_ratio": min(route_cap, base_route + route_step * level),
-        "max_total_overflow_ratio": min(total_cap, base_total + total_step * level),
-    }
+    def reward_value(self, outcome: str, improvement: float = 0.0) -> float:
+        scaled_improvement = math.sqrt(max(0.0, improvement))
+        if outcome == "global_best":
+            return float(ALGO_CONFIG["bandit_reward_global_best"]) + scaled_improvement
+        if outcome == "improving":
+            return float(ALGO_CONFIG["bandit_reward_improving"]) + 0.5 * scaled_improvement
+        if outcome == "feasible":
+            return float(ALGO_CONFIG["bandit_reward_feasible"])
+        return float(ALGO_CONFIG["bandit_reward_fail"])
+
+    def update(self, mode: str, reward: float) -> None:
+        self._scores[mode] = (1.0 - self.reaction) * self._scores[mode] + self.reaction * max(0.0, reward)
+        self._counts[mode] += 1
+
+    def stats(self) -> Dict[str, float]:
+        return {m: round(self._scores[m], 4) for m in self._MODES}
 
 
 # ==============================================================================
 #  NEIGHBORHOOD OPERATÖRLERİ
 # ==============================================================================
 
-def random_intra_route_2opt(
-        problem: HCVRPProblem, state: "SolutionState", soft_capacity: bool = False
-) -> "SolutionState":
+def random_intra_route_2opt(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
     candidate = clone_solution_state(state)
     eligible  = [r for r, route in enumerate(candidate.routes) if len(route_core(route)) >= 4]
     if not eligible: return candidate
     r_idx = random.choice(eligible); core = route_core(candidate.routes[r_idx])
     i = random.randint(0, len(core) - 2); k = random.randint(i + 1, len(core) - 1)
     candidate.routes[r_idx] = [0] + core[:i] + core[i:k+1][::-1] + core[k+1:] + [0]
-    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids, **_soft_capacity_eval_kwargs(soft_capacity))
+    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
 
-def random_inter_route_relocate(
-        problem: HCVRPProblem, state: "SolutionState", soft_capacity: bool = False
-) -> "SolutionState":
+def random_inter_route_relocate(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
     candidate = clone_solution_state(state)
     non_empty = [i for i, r in enumerate(candidate.routes) if route_core(r)]
     if len(non_empty) < 1: return candidate
-    from_idx  = random.choice(non_empty)
+    from_idx    = random.choice(non_empty)
     possible_to = [i for i in range(len(candidate.routes)) if i != from_idx]
     if not possible_to: return candidate
-    to_idx   = random.choice(possible_to)
+    to_idx    = random.choice(possible_to)
     from_core = route_core(candidate.routes[from_idx])
     to_core   = route_core(candidate.routes[to_idx])
     if not from_core: return candidate
@@ -1323,49 +1452,43 @@ def random_inter_route_relocate(
     candidate.routes[from_idx] = [0] + from_core + [0]
     candidate.routes[to_idx]   = [0] + to_core   + [0]
     candidate.routes, candidate.vehicle_ids = remove_empty_routes(candidate.routes, candidate.vehicle_ids)
-    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids, **_soft_capacity_eval_kwargs(soft_capacity))
+    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
 
-def random_inter_route_swap(
-        problem: HCVRPProblem, state: "SolutionState", soft_capacity: bool = False
-) -> "SolutionState":
+def random_inter_route_swap(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
     candidate = clone_solution_state(state)
     eligible  = [i for i, r in enumerate(candidate.routes) if route_core(r)]
     if len(eligible) < 2: return candidate
-    r1, r2 = random.sample(eligible, 2)
-    core1  = route_core(candidate.routes[r1]); core2 = route_core(candidate.routes[r2])
+    r1, r2  = random.sample(eligible, 2)
+    core1   = route_core(candidate.routes[r1]); core2 = route_core(candidate.routes[r2])
     p1 = random.randint(0, len(core1) - 1); p2 = random.randint(0, len(core2) - 1)
     core1[p1], core2[p2] = core2[p2], core1[p1]
     candidate.routes[r1] = [0] + core1 + [0]; candidate.routes[r2] = [0] + core2 + [0]
-    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids, **_soft_capacity_eval_kwargs(soft_capacity))
+    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
 
-def random_intra_route_reinsert(
-        problem: HCVRPProblem, state: "SolutionState", soft_capacity: bool = False
-) -> "SolutionState":
+def random_double_bridge_move(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
     candidate = clone_solution_state(state)
-    eligible  = [i for i, r in enumerate(candidate.routes) if len(route_core(r)) >= 3]
+    eligible  = [i for i, r in enumerate(candidate.routes) if len(route_core(r)) >= 8]
     if not eligible: return candidate
     r_idx = random.choice(eligible); core = route_core(candidate.routes[r_idx])
-    i, j  = random.sample(range(len(core)), 2)
-    customer = core.pop(i); core.insert(j, customer)
-    candidate.routes[r_idx] = [0] + core + [0]
-    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids, **_soft_capacity_eval_kwargs(soft_capacity))
+    cuts = sorted(random.sample(range(1, len(core)), 4))
+    a, b, c, d = cuts
+    s1, s2, s3, s4, s5 = core[:a], core[a:b], core[b:c], core[c:d], core[d:]
+    new_core = s1 + s4 + s3 + s2 + s5
+    candidate.routes[r_idx] = [0] + new_core + [0]
+    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
 
-def random_inter_route_2opt_star(
-        problem: HCVRPProblem, state: "SolutionState", soft_capacity: bool = False
-) -> "SolutionState":
+def random_inter_route_2opt_star(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
     candidate = clone_solution_state(state)
     eligible  = [i for i, r in enumerate(candidate.routes) if len(route_core(r)) >= 2]
     if len(eligible) < 2: return candidate
     r1, r2 = random.sample(eligible, 2)
     core1  = route_core(candidate.routes[r1]); core2 = route_core(candidate.routes[r2])
-    cut1 = random.randint(1, len(core1) - 1); cut2 = random.randint(1, len(core2) - 1)
+    cut1   = random.randint(1, len(core1) - 1); cut2 = random.randint(1, len(core2) - 1)
     candidate.routes[r1] = [0] + core1[:cut1] + core2[cut2:] + [0]
     candidate.routes[r2] = [0] + core2[:cut2] + core1[cut1:] + [0]
-    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids, **_soft_capacity_eval_kwargs(soft_capacity))
+    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
 
-def random_vehicle_reassignment(
-        problem: HCVRPProblem, state: "SolutionState", soft_capacity: bool = False
-) -> "SolutionState":
+def random_vehicle_reassignment(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
     candidate  = clone_solution_state(state)
     if not candidate.routes: return candidate
     type_usage = _type_usage_from_ids(candidate.vehicle_ids)
@@ -1373,7 +1496,7 @@ def random_vehicle_reassignment(
     random.shuffle(route_indices)
     best_move = None
     for r_idx in route_indices:
-        route          = candidate.routes[r_idx]
+        route           = candidate.routes[r_idx]
         current_type_id = candidate.vehicle_ids[r_idx]
         current_type    = get_vehicle_type_by_id(problem, current_type_id)
         route_ok, _, _, _, current_cost = evaluate_route_for_vehicle(problem, route, current_type)
@@ -1382,7 +1505,7 @@ def random_vehicle_reassignment(
             problem, route, current_type_id=current_type_id, type_usage=type_usage
         )
         if best_vehicle is None: continue
-        new_type_id, new_cost, _, _ = best_vehicle
+        new_type_id, new_cost, _ = best_vehicle
         if new_type_id == current_type_id: continue
         move_key = (new_cost - current_cost, new_cost, r_idx, new_type_id)
         if best_move is None or move_key < best_move[0]:
@@ -1390,15 +1513,13 @@ def random_vehicle_reassignment(
     if best_move is None: return candidate
     r_idx, _, new_type_id = best_move[1]
     candidate.vehicle_ids[r_idx] = new_type_id
-    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids, **_soft_capacity_eval_kwargs(soft_capacity))
+    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
 
-def propose_random_neighbor(
-        problem: HCVRPProblem, state: "SolutionState", soft_capacity: bool = False
-) -> "SolutionState":
+def propose_random_neighbor(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
     return random.choice([
-        random_intra_route_2opt, random_inter_route_relocate, random_inter_route_swap,
-        random_inter_route_2opt_star, random_intra_route_reinsert, random_vehicle_reassignment
-    ])(problem, state, soft_capacity=soft_capacity)
+        random_intra_route_2opt, random_inter_route_relocate,
+        random_inter_route_2opt_star, random_double_bridge_move, random_vehicle_reassignment
+    ])(problem, state)
 
 
 # ==============================================================================
@@ -1449,13 +1570,30 @@ def get_local_search_limits(state: "SolutionState") -> Dict[str, float]:
 #  LOCAL SEARCH (best-improving)
 # ==============================================================================
 
+def compute_single_route_centroid(problem: HCVRPProblem, route: Route) -> Point:
+    if NUMBA_AVAILABLE and np is not None:
+        depot_x, depot_y = problem.coords[0]
+        cx, cy = _compute_route_centroid_numba(
+            _route_to_numpy(route), problem.coords_np, depot_x, depot_y
+        )
+        return (float(cx), float(cy))
+    core = route_core(route)
+    if not core: return problem.coords[0]
+    sx = sum(problem.coords[n][0] for n in core)
+    sy = sum(problem.coords[n][1] for n in core)
+    m  = float(len(core))
+    return (sx / m, sy / m)
+
+
 def select_promising_route_pairs(
-        problem: HCVRPProblem, routes: Route_matrix, max_pairs: int = 10
+        problem: HCVRPProblem, routes: Route_matrix, max_pairs: int = 10,
+        centroids: Optional[List[Point]] = None
 ) -> List[Tuple[int, int]]:
     non_empty = [i for i, r in enumerate(routes) if route_core(r)]
     if len(non_empty) < 2: return []
-    centroids = compute_route_centroids(problem, routes)
-    scored    = []
+    if centroids is None:
+        centroids = compute_route_centroids(problem, routes)
+    scored = []
     for idx_i in range(len(non_empty)):
         i = non_empty[idx_i]; xi, yi = centroids[i]
         for idx_j in range(idx_i + 1, len(non_empty)):
@@ -1464,6 +1602,7 @@ def select_promising_route_pairs(
             scored.append((dx*dx + dy*dy, i, j))
     scored.sort(key=lambda x: (x[0], x[1], x[2]))
     return [(i, j) for _, i, j in scored[:max_pairs]]
+
 
 def compute_route_centroids(problem: HCVRPProblem, routes: Route_matrix) -> List[Point]:
     if NUMBA_AVAILABLE and np is not None:
@@ -1484,28 +1623,76 @@ def compute_route_centroids(problem: HCVRPProblem, routes: Route_matrix) -> List
         centroids.append((sx / m, sy / m))
     return centroids
 
+
+def route_spread_value(problem: HCVRPProblem, route: Route) -> float:
+    core = route_core(route)
+    if not core:
+        return 0.0
+    cx, cy = compute_single_route_centroid(problem, route)
+    return max(math.hypot(problem.coords[n][0] - cx, problem.coords[n][1] - cy) for n in core)
+
+
+def customer_outlier_score(problem: HCVRPProblem, route: Route, customer: int) -> float:
+    core = route_core(route)
+    if customer not in core or len(core) <= 1:
+        return 0.0
+    cx, cy = compute_single_route_centroid(problem, route)
+    radial = math.hypot(problem.coords[customer][0] - cx, problem.coords[customer][1] - cy)
+    nearest = min(problem.dist[customer][other] for other in core if other != customer)
+    granular_neighbors = set(problem.granular_neighbors[customer]) if customer < len(problem.granular_neighbors) else set()
+    overlap = sum(1 for other in core if other != customer and other in granular_neighbors)
+    return radial + 0.45 * nearest - 55.0 * overlap
+
+
+def rank_route_outliers(problem: HCVRPProblem, route: Route, max_customers: int = 3) -> List[int]:
+    core = route_core(route)
+    scored = [
+        (customer_outlier_score(problem, route, customer), customer)
+        for customer in core
+    ]
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [customer for _, customer in scored[:max_customers]]
+
+
 def best_improving_intra_route_2opt(
         problem: HCVRPProblem, state: "SolutionState", max_routes: int = 6
 ) -> "SolutionState":
     best_state = clone_solution_state(state)
-    candidates = [(state.route_costs[r], r) for r, route in enumerate(state.routes) if len(route_core(route)) >= 4]
+    candidates = [
+        (state.route_costs[r], r)
+        for r, route in enumerate(state.routes) if len(route_core(route)) >= 4
+    ]
     candidates.sort(key=lambda x: (-x[0], x[1]))
+
     for _, r_idx in candidates[:max_routes]:
-        core = route_core(state.routes[r_idx])
-        vt = get_vehicle_type_by_id(problem, state.vehicle_ids[r_idx])
+        core            = route_core(state.routes[r_idx])
+        vt              = get_vehicle_type_by_id(problem, state.vehicle_ids[r_idx])
+        base_other_cost = state.total_cost - state.route_costs[r_idx]
+        best_route_total = best_state.total_cost
+        best_imp: Optional[Tuple] = None
+
         for i in range(len(core) - 2):
             for k in range(i + 1, len(core) - 1):
-                new_core = core[:i] + core[i:k+1][::-1] + core[k+1:]
+                new_core  = core[:i] + core[i:k+1][::-1] + core[k+1:]
                 new_route = [0] + new_core + [0]
-                route_ok, load, dist, route_time, route_cost = evaluate_route_for_vehicle(problem, new_route, vt)
+                route_ok, load, dist, route_time, route_cost = evaluate_route_for_vehicle(
+                    problem, new_route, vt
+                )
                 if not route_ok:
                     continue
-                candidate = clone_state_with_updated_route(
-                    state, r_idx, new_route, load, dist, route_time, route_cost
-                )
-                if candidate.total_cost < best_state.total_cost:
-                    best_state = candidate
+                candidate_total = base_other_cost + route_cost
+                if candidate_total < best_route_total:
+                    best_route_total = candidate_total
+                    best_imp = (new_route, load, dist, route_time, route_cost)
+
+        if best_imp is not None:
+            new_route, load, dist, route_time, route_cost = best_imp
+            best_state = clone_state_with_updated_route(
+                state, r_idx, new_route, load, dist, route_time, route_cost
+            )
+
     return best_state
+
 
 def best_improving_inter_route_relocate(
         problem: HCVRPProblem, state: "SolutionState", max_pairs: int = 8
@@ -1526,6 +1713,137 @@ def best_improving_inter_route_relocate(
             if cs.feasible and cs.total_cost < best_state.total_cost: best_state = cs
     return best_state
 
+
+def best_improving_outlier_relocate(
+        problem: HCVRPProblem, state: "SolutionState",
+        max_source_routes: int = 6, max_target_routes: int = 6,
+        max_outliers_per_route: int = 3
+) -> "SolutionState":
+    best_state = clone_solution_state(state)
+    source_scores = []
+    for r_idx, route in enumerate(state.routes):
+        core = route_core(route)
+        if len(core) < 3:
+            continue
+        source_scores.append((route_spread_value(problem, route), state.route_costs[r_idx], r_idx))
+    source_scores.sort(key=lambda x: (-x[0], -x[1], x[2]))
+
+    for _, _, from_idx in source_scores[:max_source_routes]:
+        from_route = state.routes[from_idx]
+        outliers = rank_route_outliers(problem, from_route, max_outliers_per_route)
+        for customer in outliers:
+            candidate_targets = [
+                r_idx for r_idx in select_candidate_route_indices(
+                    problem, state.routes, customer, max_candidates=max_target_routes
+                )
+                if r_idx != from_idx
+            ]
+            for to_idx in candidate_targets:
+                from_core = route_core(state.routes[from_idx])
+                if customer not in from_core:
+                    continue
+                reduced_core = [n for n in from_core if n != customer]
+                to_route = state.routes[to_idx]
+                insert_pos, _ = choose_best_insertion_position(problem, to_route, customer)
+                to_core = route_core(to_route)
+                to_core.insert(insert_pos - 1, customer)
+                cr = clone_routes(state.routes)
+                cr[from_idx] = [0] + reduced_core + [0]
+                cr[to_idx] = [0] + to_core + [0]
+                cr, cv = remove_empty_routes(cr, state.vehicle_ids[:])
+                cs = evaluate_solution(problem, cr, cv)
+                if cs.feasible and cs.total_cost < best_state.total_cost:
+                    best_state = cs
+    return best_state
+
+
+def best_improving_ejection_chain(
+        problem: HCVRPProblem, state: "SolutionState",
+        max_source_routes: int = 4, max_target_routes: int = 4,
+        max_outliers_per_route: int = 2, max_eject_per_target: int = 2
+) -> "SolutionState":
+    best_state = clone_solution_state(state)
+    source_scores = []
+    for r_idx, route in enumerate(state.routes):
+        core = route_core(route)
+        if len(core) < 3:
+            continue
+        source_scores.append((route_spread_value(problem, route), state.route_costs[r_idx], r_idx))
+    source_scores.sort(key=lambda x: (-x[0], -x[1], x[2]))
+
+    for _, _, from_idx in source_scores[:max_source_routes]:
+        from_route = state.routes[from_idx]
+        for customer in rank_route_outliers(problem, from_route, max_outliers_per_route):
+            target_indices = [
+                r_idx for r_idx in select_candidate_route_indices(
+                    problem, state.routes, customer, max_candidates=max_target_routes
+                )
+                if r_idx != from_idx
+            ]
+            for to_idx in target_indices:
+                target_route = state.routes[to_idx]
+                eject_candidates = rank_route_outliers(problem, target_route, max_eject_per_target)
+                for eject_customer in eject_candidates:
+                    from_core = route_core(state.routes[from_idx])
+                    to_core = route_core(state.routes[to_idx])
+                    if customer not in from_core or eject_customer not in to_core:
+                        continue
+                    reduced_from = [n for n in from_core if n != customer]
+                    reduced_target = [n for n in to_core if n != eject_customer]
+                    insert_pos, _ = choose_best_insertion_position(problem, [0] + reduced_target + [0], customer)
+                    reduced_target.insert(insert_pos - 1, customer)
+
+                    base_routes = clone_routes(state.routes)
+                    base_routes[from_idx] = [0] + reduced_from + [0]
+                    base_routes[to_idx] = [0] + reduced_target + [0]
+                    base_routes, base_vehicle_ids = remove_empty_routes(base_routes, state.vehicle_ids[:])
+
+                    route_centroids = compute_route_centroids(problem, base_routes)
+                    inserted = False
+                    third_targets = select_candidate_route_indices(
+                        problem, base_routes, eject_customer, max_candidates=max_target_routes,
+                        route_centroids=route_centroids
+                    )
+                    for third_idx in third_targets:
+                        target_core = route_core(base_routes[third_idx])
+                        ins_pos, _ = choose_best_insertion_position(problem, base_routes[third_idx], eject_customer)
+                        new_routes = clone_routes(base_routes)
+                        target_core = route_core(new_routes[third_idx])
+                        target_core.insert(ins_pos - 1, eject_customer)
+                        new_routes[third_idx] = [0] + target_core + [0]
+                        cs = evaluate_solution(problem, new_routes, base_vehicle_ids[:])
+                        if cs.feasible:
+                            inserted = True
+                            if cs.total_cost < best_state.total_cost:
+                                best_state = cs
+                            break
+                    if inserted:
+                        continue
+    return best_state
+
+
+def best_improving_inter_route_swap(
+        problem: HCVRPProblem, state: "SolutionState", max_pairs: int = 6
+) -> "SolutionState":
+    best_state = clone_solution_state(state)
+    for r1, r2 in select_promising_route_pairs(problem, state.routes, max_pairs=max_pairs):
+        core1 = route_core(state.routes[r1]); core2 = route_core(state.routes[r2])
+        if not core1 or not core2:
+            continue
+        for i, c1 in enumerate(core1):
+            for j, c2 in enumerate(core2):
+                cr = clone_routes(state.routes)
+                nr1 = core1[:]
+                nr2 = core2[:]
+                nr1[i], nr2[j] = c2, c1
+                cr[r1] = [0] + nr1 + [0]
+                cr[r2] = [0] + nr2 + [0]
+                cs = evaluate_solution(problem, cr, state.vehicle_ids)
+                if cs.feasible and cs.total_cost < best_state.total_cost:
+                    best_state = cs
+    return best_state
+
+
 def best_improving_inter_route_2opt_star(
         problem: HCVRPProblem, state: "SolutionState",
         max_pairs: int = 6, max_cuts_per_route: int = 5
@@ -1542,6 +1860,7 @@ def best_improving_inter_route_2opt_star(
                 cs = evaluate_solution(problem, cr, state.vehicle_ids)
                 if cs.feasible and cs.total_cost < best_state.total_cost: best_state = cs
     return best_state
+
 
 def best_improving_cross_exchange(
         problem: HCVRPProblem, state: "SolutionState",
@@ -1566,6 +1885,82 @@ def best_improving_cross_exchange(
                         if cs.feasible and cs.total_cost < best_state.total_cost: best_state = cs
     return best_state
 
+
+def best_improving_or_opt(
+        problem: HCVRPProblem, state: "SolutionState",
+        max_routes: int = 5, max_block_size: int = 3
+) -> "SolutionState":
+    best_state = clone_solution_state(state)
+    candidates = [
+        (state.route_costs[r], r)
+        for r, route in enumerate(state.routes) if len(route_core(route)) >= 4
+    ]
+    candidates.sort(key=lambda x: (-x[0], x[1]))
+    for _, r_idx in candidates[:max_routes]:
+        core = route_core(state.routes[r_idx])
+        vt = get_vehicle_type_by_id(problem, state.vehicle_ids[r_idx])
+        for block_size in range(1, min(max_block_size + 1, len(core))):
+            for start in range(len(core) - block_size + 1):
+                block = core[start:start + block_size]
+                reduced = core[:start] + core[start + block_size:]
+                for ins_pos in range(len(reduced) + 1):
+                    if ins_pos == start or ins_pos == start + 1:
+                        continue
+                    new_core = reduced[:ins_pos] + block + reduced[ins_pos:]
+                    new_route = [0] + new_core + [0]
+                    rok, load, dist, route_time, route_cost = evaluate_route_for_vehicle(
+                        problem, new_route, vt
+                    )
+                    if not rok:
+                        continue
+                    candidate = clone_state_with_updated_route(
+                        state, r_idx, new_route, load, dist, route_time, route_cost
+                    )
+                    if candidate.feasible and candidate.total_cost < best_state.total_cost:
+                        best_state = candidate
+    return best_state
+
+
+def best_improving_double_bridge_move(
+        problem: HCVRPProblem, state: "SolutionState", max_routes: int = 3
+) -> "SolutionState":
+    best_state = clone_solution_state(state)
+    candidates = [
+        (state.route_costs[r], r)
+        for r, route in enumerate(state.routes) if len(route_core(route)) >= 8
+    ]
+    candidates.sort(key=lambda x: (-x[0], x[1]))
+    for _, r_idx in candidates[:max_routes]:
+        core = route_core(state.routes[r_idx])
+        vt = get_vehicle_type_by_id(problem, state.vehicle_ids[r_idx])
+        cut_positions = evenly_spaced_positions(1, len(core), 6)
+        if len(cut_positions) < 4:
+            continue
+        seen = set()
+        for a_idx in range(len(cut_positions) - 3):
+            for b_idx in range(a_idx + 1, len(cut_positions) - 2):
+                for c_idx in range(b_idx + 1, len(cut_positions) - 1):
+                    for d_idx in range(c_idx + 1, len(cut_positions)):
+                        a, b, c, d = cut_positions[a_idx], cut_positions[b_idx], cut_positions[c_idx], cut_positions[d_idx]
+                        if (a, b, c, d) in seen:
+                            continue
+                        seen.add((a, b, c, d))
+                        s1, s2, s3, s4, s5 = core[:a], core[a:b], core[b:c], core[c:d], core[d:]
+                        new_core = s1 + s4 + s3 + s2 + s5
+                        new_route = [0] + new_core + [0]
+                        rok, load, dist, route_time, route_cost = evaluate_route_for_vehicle(
+                            problem, new_route, vt
+                        )
+                        if not rok:
+                            continue
+                        candidate = clone_state_with_updated_route(
+                            state, r_idx, new_route, load, dist, route_time, route_cost
+                        )
+                        if candidate.feasible and candidate.total_cost < best_state.total_cost:
+                            best_state = candidate
+    return best_state
+
+
 def intensify_local_search(
         problem: HCVRPProblem, state: "SolutionState", max_rounds: int = 3
 ) -> "SolutionState":
@@ -1574,12 +1969,23 @@ def intensify_local_search(
     for _ in range(min(max_rounds, int(limits["ls_rounds"]))):
         improved = False
         for op, kwargs in [
-            (best_improving_intra_route_2opt,     {"max_routes":         int(limits["intra_routes"])}),
-            (best_improving_inter_route_relocate,  {"max_pairs":          int(limits["relocate_pairs"])}),
-            (best_improving_inter_route_2opt_star, {"max_pairs":          int(limits["two_opt_pairs"]),
-                                                    "max_cuts_per_route": int(limits["max_cuts_per_route"])}),
-            (best_improving_cross_exchange,        {"max_pairs":          int(limits["cross_pairs"]),
-                                                    "max_start_positions":int(limits["max_cross_starts"])}),
+            (best_improving_intra_route_2opt,     {"max_routes":          int(limits["intra_routes"])}),
+            (best_improving_or_opt,               {"max_routes":          int(limits["intra_routes"]),
+                                                   "max_block_size":      3}),
+            (best_improving_double_bridge_move,   {"max_routes":          max(1, int(limits["intra_routes"]) // 2)}),
+            (best_improving_outlier_relocate,     {"max_source_routes":   int(ALGO_CONFIG["outlier_source_routes"]),
+                                                   "max_target_routes":   int(ALGO_CONFIG["outlier_target_routes"]),
+                                                   "max_outliers_per_route": int(ALGO_CONFIG["outlier_customers_per_route"])}),
+            (best_improving_ejection_chain,       {"max_source_routes":   max(1, int(ALGO_CONFIG["outlier_source_routes"]) // 2),
+                                                   "max_target_routes":   int(ALGO_CONFIG["ejection_target_routes"]),
+                                                   "max_outliers_per_route": int(ALGO_CONFIG["outlier_customers_per_route"]),
+                                                   "max_eject_per_target": int(ALGO_CONFIG["ejection_candidates_per_route"])}),
+            (best_improving_inter_route_relocate,  {"max_pairs":           int(limits["relocate_pairs"])}),
+            (best_improving_inter_route_swap,      {"max_pairs":           int(limits["relocate_pairs"])}),
+            (best_improving_inter_route_2opt_star, {"max_pairs":           int(limits["two_opt_pairs"]),
+                                                    "max_cuts_per_route":  int(limits["max_cuts_per_route"])}),
+            (best_improving_cross_exchange,        {"max_pairs":           int(limits["cross_pairs"]),
+                                                    "max_start_positions": int(limits["max_cross_starts"])}),
         ]:
             candidate = op(problem, current, **kwargs)
             if candidate.feasible and candidate.total_cost < current.total_cost:
@@ -1594,13 +2000,15 @@ def intensify_local_search(
         if not improved: break
     return current
 
+
 def stagnation_kick(
         problem: HCVRPProblem, state: "SolutionState",
-        ruin_frac: float = 0.35, stagnation_level: int = 0
+        ruin_frac: float = 0.35,
+        bandit: Optional["DestroyBandit"] = None
 ) -> "SolutionState":
     kicked = ruin_and_rebuild_routes(
-        problem, state, ruin_frac=ruin_frac, destroy_mode="route",
-        stagnation_level=stagnation_level
+        problem, state, ruin_frac=ruin_frac,
+        destroy_mode="route", bandit=bandit, use_bandit=(bandit is not None)
     )
     return intensify_local_search(problem, kicked, max_rounds=3)
 
@@ -1612,7 +2020,7 @@ def stagnation_kick(
 def choose_best_insertion_position(
         problem: HCVRPProblem, route: Route, customer: int
 ) -> Tuple[int, float]:
-    nr = normalize_route(route)
+    nr = _ensure_normalized(route)
     if NUMBA_AVAILABLE and np is not None:
         best_pos, best_delta = _best_insertion_position_numba(
             _route_to_numpy(nr), customer, problem.dist_np
@@ -1625,6 +2033,7 @@ def choose_best_insertion_position(
         if delta < best_delta: best_delta = delta; best_pos = i + 1
     return best_pos, best_delta
 
+
 def select_candidate_route_indices(
         problem: HCVRPProblem,
         routes: Route_matrix,
@@ -1634,20 +2043,33 @@ def select_candidate_route_indices(
 ) -> List[int]:
     if len(routes) <= max_candidates: return list(range(len(routes)))
     cx, cy = problem.coords[customer]
+    granular_neighbors = set(problem.granular_neighbors[customer]) if customer < len(problem.granular_neighbors) else set()
     if route_centroids is None:
         route_centroids = compute_route_centroids(problem, routes)
     if NUMBA_AVAILABLE and np is not None:
         centroid_arr = np.asarray(route_centroids, dtype=np.float64)
-        return list(_select_candidate_route_indices_numba(
-            cx, cy, centroid_arr[:, 0], centroid_arr[:, 1], max_candidates
+        base = list(_select_candidate_route_indices_numba(
+            cx, cy, centroid_arr[:, 0], centroid_arr[:, 1], min(len(routes), max_candidates * 2)
         ))
+        if not granular_neighbors:
+            return base[:max_candidates]
+        boost_weight = float(ALGO_CONFIG["granular_route_boost_weight"])
+        scored = []
+        for r_idx in base:
+            overlap = sum(1 for n in route_core(routes[r_idx]) if n in granular_neighbors)
+            dx = cx - route_centroids[r_idx][0]
+            dy = cy - route_centroids[r_idx][1]
+            scored.append((-overlap, (dx * dx + dy * dy) / max(boost_weight, 1.0), r_idx))
+        scored.sort(key=lambda x: (x[0], x[1], x[2]))
+        return [r for _, _, r in scored[:max_candidates]]
     scored = []
     for r_idx, centroid in enumerate(route_centroids):
-        dx = cx - centroid[0]
-        dy = cy - centroid[1]
-        scored.append((dx * dx + dy * dy, r_idx))
-    scored.sort(key=lambda x: (x[0], x[1]))
-    return [r for _, r in scored[:max_candidates]]
+        dx = cx - centroid[0]; dy = cy - centroid[1]
+        overlap = sum(1 for n in route_core(routes[r_idx]) if n in granular_neighbors)
+        scored.append((-overlap, dx * dx + dy * dy, r_idx))
+    scored.sort(key=lambda x: (x[0], x[1], x[2]))
+    return [r for _, _, r in scored[:max_candidates]]
+
 
 def build_insertion_options_for_customer(
         problem: HCVRPProblem,
@@ -1660,62 +2082,49 @@ def build_insertion_options_for_customer(
         candidate_route_limit: int = 8,
         route_centroids: Optional[List[Point]] = None,
         max_options: Optional[int] = None,
-        allow_new_route: bool = True,
-        soft_capacity: bool = False,
-        soft_eval_kwargs: Optional[Dict[str, float]] = None
+        allow_new_route: bool = True
 ) -> List[Tuple]:
     options: List[Tuple] = []
     customer_demand = problem.demands[customer]
-    if soft_eval_kwargs is None:
-        soft_eval_kwargs = _soft_capacity_eval_kwargs(soft_capacity, mode="rebuild")
-    penalty_coeff = float(soft_eval_kwargs.get("capacity_penalty_coeff", 0.0))
-    penalty_power = float(soft_eval_kwargs.get("capacity_penalty_power", 2.0))
-    max_route_overflow_ratio = float(soft_eval_kwargs.get("max_route_overflow_ratio", 0.0))
-    soft_route_load_cap = problem.max_vehicle_capacity * (1.0 + max_route_overflow_ratio)
     for r_idx in select_candidate_route_indices(
             problem, routes, customer,
             max_candidates=candidate_route_limit,
             route_centroids=route_centroids):
-        if current_route_loads is not None and current_route_loads[r_idx] + customer_demand > (
-                soft_route_load_cap if soft_capacity else problem.max_vehicle_capacity):
+        if (current_route_loads is not None
+                and current_route_loads[r_idx] + customer_demand > problem.max_vehicle_capacity):
             continue
-        route          = routes[r_idx]
+        route           = routes[r_idx]
         current_type_id = vehicle_ids[r_idx]
         current_type    = get_vehicle_type_by_id(problem, current_type_id)
         if current_route_costs is not None and current_route_costs[r_idx] is not None:
             current_cost = current_route_costs[r_idx]
         else:
-            route_ok, route_load, _, _, current_cost = evaluate_route_for_vehicle(
-                problem, route, current_type, allow_capacity_overflow=soft_capacity
-            )
+            route_ok, _, _, _, current_cost = evaluate_route_for_vehicle(problem, route, current_type)
             if not route_ok: continue
-            if soft_capacity:
-                current_cost += _capacity_overflow_penalty(
-                    max(0.0, route_load - current_type.capacity), penalty_coeff, penalty_power
-                )
         pos, _          = choose_best_insertion_position(problem, route, customer)
         candidate_route = route[:]
         candidate_route.insert(pos, customer)
         best_vehicle    = assign_best_vehicle_for_existing_route(
-            problem, candidate_route, current_type_id=current_type_id,
-            type_usage=type_usage, allow_capacity_overflow=soft_capacity
+            problem, candidate_route, current_type_id=current_type_id, type_usage=type_usage
         )
         if best_vehicle is None: continue
-        new_type_id, new_cost, _, overflow = best_vehicle
-        penalized_new_cost = new_cost + _capacity_overflow_penalty(overflow, penalty_coeff, penalty_power)
-        options.append((penalized_new_cost - current_cost, ("existing", r_idx, pos, new_type_id, new_cost)))
+        new_type_id, new_cost, _ = best_vehicle
+        options.append((new_cost - current_cost, ("existing", r_idx, pos, new_type_id, new_cost)))
     if allow_new_route:
-        new_route  = [0, customer, 0]
+        new_route   = [0, customer, 0]
         new_type_id = assign_best_feasible_vehicle_for_tour(problem, new_route, type_usage)
         if new_type_id is not None:
             new_type = get_vehicle_type_by_id(problem, new_type_id)
             _, _, _, _, nrc = evaluate_route_for_vehicle(problem, new_route, new_type)
             options.append((nrc, ("new", -1, -1, new_type_id, nrc)))
     if max_options is not None and len(options) > max_options:
-        options = heapq.nsmallest(max_options, options, key=lambda x: (x[0], x[1][0], x[1][1], x[1][2], x[1][3]))
+        options = heapq.nsmallest(
+            max_options, options, key=lambda x: (x[0], x[1][0], x[1][1], x[1][2], x[1][3])
+        )
     else:
         options.sort(key=lambda x: (x[0], x[1][0], x[1][1], x[1][2], x[1][3]))
     return options
+
 
 def choose_regret_customer_insertion(
         problem: HCVRPProblem,
@@ -1729,9 +2138,7 @@ def choose_regret_customer_insertion(
         candidate_customer_limit: Optional[int] = None,
         candidate_route_limit: Optional[int] = None,
         allow_new_route: bool = True,
-        soft_capacity: bool = False,
-        soft_eval_kwargs: Optional[Dict[str, float]] = None,
-        deterministic: bool = False
+        route_centroids: Optional[List[Point]] = None
 ) -> Optional[Tuple]:
     best_customer_choice = None
     if current_route_costs is None:
@@ -1740,21 +2147,13 @@ def choose_regret_customer_insertion(
             vt = get_vehicle_type_by_id(problem, type_id)
             route_ok, _, _, _, rc = evaluate_route_for_vehicle(problem, route, vt)
             current_route_costs.append(rc if route_ok else None)
-            if route_ok and soft_capacity:
-                current_route_costs[-1] = rc + _capacity_overflow_penalty(
-                    max(0.0, problem.route_load(route) - vt.capacity),
-                    float((soft_eval_kwargs or _soft_capacity_eval_kwargs(True, mode="rebuild")).get("capacity_penalty_coeff", 0.0)),
-                    float((soft_eval_kwargs or _soft_capacity_eval_kwargs(True, mode="rebuild")).get("capacity_penalty_power", 2.0)),
-                )
-    route_centroids = compute_route_centroids(problem, routes)
+    if route_centroids is None:
+        route_centroids = compute_route_centroids(problem, routes)
     profile = get_problem_scale_profile(problem, active_route_count=max(1, len(routes)))
     if candidate_customer_limit is None: candidate_customer_limit = int(profile["regret_customer_limit"])
     if candidate_route_limit    is None: candidate_route_limit    = int(profile["regret_route_limit"])
-    if deterministic:
-        prioritized = candidate_customers
-    else:
-        prioritized = (random.sample(candidate_customers, candidate_customer_limit)
-                       if len(candidate_customers) > candidate_customer_limit else candidate_customers)
+    prioritized = (random.sample(candidate_customers, candidate_customer_limit)
+                   if len(candidate_customers) > candidate_customer_limit else candidate_customers)
     for customer in prioritized:
         options = build_insertion_options_for_customer(
             problem, routes, vehicle_ids, type_usage, customer,
@@ -1763,9 +2162,7 @@ def choose_regret_customer_insertion(
             candidate_route_limit=candidate_route_limit,
             route_centroids=route_centroids,
             max_options=max(regret_k, 2),
-            allow_new_route=allow_new_route,
-            soft_capacity=soft_capacity,
-            soft_eval_kwargs=soft_eval_kwargs
+            allow_new_route=allow_new_route
         )
         if not options: continue
         best_delta, best_action = options[0]
@@ -1775,6 +2172,7 @@ def choose_regret_customer_insertion(
         if best_customer_choice is None or choice_key < best_customer_choice[0]:
             best_customer_choice = (choice_key, (customer, best_action, best_delta, regret_score))
     return None if best_customer_choice is None else best_customer_choice[1]
+
 
 def sample_regret_k() -> int:
     return 3 if random.random() < float(ALGO_CONFIG["regret3_probability"]) else 2
@@ -1845,13 +2243,16 @@ def sample_destroy_mode() -> str:
     p_shaw  = max(0.0, min(1.0, float(ALGO_CONFIG["destroy_prob_shaw"])))
     p_worst = max(0.0, min(1.0 - p_shaw, float(ALGO_CONFIG["destroy_prob_worst"])))
     roll    = random.random()
-    if roll < p_shaw: return "shaw"
-    if roll < p_shaw + p_worst: return "worst"
+    if roll < p_shaw:             return "shaw"
+    if roll < p_shaw + p_worst:   return "worst"
     return "route"
 
 def remove_customers_from_routes(routes: Route_matrix, customers_to_remove: Set[int]) -> Route_matrix:
-    return [[0] + [n for n in route if n != 0 and n not in customers_to_remove] + [0]
-            for route in routes if any(n not in customers_to_remove for n in route if n != 0)]
+    return [
+        [0] + [n for n in route if n != 0 and n not in customers_to_remove] + [0]
+        for route in routes
+        if any(n not in customers_to_remove for n in route if n != 0)
+    ]
 
 
 def _apply_regret_insertion(
@@ -1861,213 +2262,69 @@ def _apply_regret_insertion(
         type_usage: Dict[int, int],
         pending_customers: List[int],
         allow_new_route: bool = True,
-        soft_capacity: bool = False,
-        soft_eval_kwargs: Optional[Dict[str, float]] = None,
-        deterministic: bool = False,
-        regret_k_override: Optional[int] = None,
-        candidate_customer_limit: Optional[int] = None,
-        candidate_route_limit: Optional[int] = None
+        route_centroids: Optional[List[Point]] = None
 ) -> bool:
-    """
-    Ortak regret-insert döngüsü. Yerleştirilemeyen müşteri varsa False döner.
-    routes / vehicle_ids / type_usage in-place güncellenir.
-    """
+    if route_centroids is None:
+        route_centroids = compute_route_centroids(problem, routes)
+
     current_route_costs: List[Optional[float]] = []
     current_route_loads: List[float] = []
-    if soft_eval_kwargs is None:
-        soft_eval_kwargs = _soft_capacity_eval_kwargs(soft_capacity, mode="rebuild")
-    penalty_coeff = float(soft_eval_kwargs.get("capacity_penalty_coeff", 0.0))
-    penalty_power = float(soft_eval_kwargs.get("capacity_penalty_power", 2.0))
     for route, type_id in zip(routes, vehicle_ids):
         vt = get_vehicle_type_by_id(problem, type_id)
-        route_ok, route_load, _, _, rc = evaluate_route_for_vehicle(
-            problem, route, vt, allow_capacity_overflow=soft_capacity
-        )
-        if route_ok and soft_capacity:
-            rc += _capacity_overflow_penalty(max(0.0, route_load - vt.capacity), penalty_coeff, penalty_power)
+        route_ok, route_load, _, _, rc = evaluate_route_for_vehicle(problem, route, vt)
         current_route_costs.append(rc if route_ok else None)
         current_route_loads.append(route_load)
+
     while pending_customers:
         rc = choose_regret_customer_insertion(
             problem, routes, vehicle_ids, type_usage,
-            pending_customers, regret_k=(sample_regret_k() if regret_k_override is None else regret_k_override),
+            pending_customers, regret_k=sample_regret_k(),
             current_route_costs=current_route_costs,
             current_route_loads=current_route_loads,
-            candidate_customer_limit=candidate_customer_limit,
-            candidate_route_limit=candidate_route_limit,
             allow_new_route=allow_new_route,
-            soft_capacity=soft_capacity,
-            soft_eval_kwargs=soft_eval_kwargs,
-            deterministic=deterministic
+            route_centroids=route_centroids
         )
         if rc is None: return False
         customer, best_action, _, _ = rc
         action_type, r_idx, pos, new_type_id, new_cost = best_action
+
         if action_type == "existing":
             old_type_id = vehicle_ids[r_idx]
             nr = normalize_route(routes[r_idx]); nr.insert(pos, customer)
             routes[r_idx] = nr; vehicle_ids[r_idx] = new_type_id
-            new_type = get_vehicle_type_by_id(problem, new_type_id)
-            penalized_cost = new_cost
-            if soft_capacity:
-                penalized_cost += _capacity_overflow_penalty(
-                    max(0.0, current_route_loads[r_idx] + problem.demands[customer] - new_type.capacity),
-                    penalty_coeff, penalty_power
-                )
-            current_route_costs[r_idx] = penalized_cost
+            current_route_costs[r_idx] = new_cost
             current_route_loads[r_idx] += problem.demands[customer]
+            route_centroids[r_idx] = compute_single_route_centroid(problem, nr)
             if old_type_id != new_type_id:
                 type_usage[old_type_id] -= 1
                 if type_usage[old_type_id] <= 0: del type_usage[old_type_id]
                 type_usage[new_type_id] = type_usage.get(new_type_id, 0) + 1
         else:
             if not allow_new_route: return False
-            routes.append([0, customer, 0]); vehicle_ids.append(new_type_id)
+            new_route = [0, customer, 0]
+            routes.append(new_route); vehicle_ids.append(new_type_id)
             type_usage[new_type_id] = type_usage.get(new_type_id, 0) + 1
             current_route_costs.append(new_cost)
             current_route_loads.append(problem.demands[customer])
+            route_centroids.append(compute_single_route_centroid(problem, new_route))
+
         pending_customers.remove(customer)
     return True
 
 
-def repair_capacity_to_feasible(
-        problem: HCVRPProblem,
-        routes: Route_matrix,
-        vehicle_ids: List[int]
-) -> Optional["SolutionState"]:
-    routes = clone_routes(routes)
-    vehicle_ids = vehicle_ids[:]
-    pending: List[int] = []
-    while True:
-        overloaded = []
-        for r_idx, (route, type_id) in enumerate(zip(routes, vehicle_ids)):
-            vt = get_vehicle_type_by_id(problem, type_id)
-            route_load = problem.route_load(route)
-            overflow = route_load - vt.capacity
-            if overflow > 1e-9:
-                overloaded.append((overflow, r_idx, route_load))
-        if not overloaded:
-            break
-        overloaded.sort(key=lambda x: (-x[0], -x[2], x[1]))
-        _, target_idx, _ = overloaded[0]
-        source_route = routes[target_idx]
-        source_core = route_core(source_route)
-        if not source_core:
-            return None
-        source_type_id = vehicle_ids[target_idx]
-        source_type = get_vehicle_type_by_id(problem, source_type_id)
-        _, _, _, _, source_current_cost = evaluate_route_for_vehicle(
-            problem, source_route, source_type, allow_capacity_overflow=True
-        )
-        best_move = None
-        for pos, customer in enumerate(source_core):
-            reduced_core = source_core[:pos] + source_core[pos + 1:]
-            reduced_route = [0] + reduced_core + [0]
-            reduced_overflow = max(0.0, problem.route_load(reduced_route) - source_type.capacity)
-            _, _, _, _, reduced_source_cost = evaluate_route_for_vehicle(
-                problem, reduced_route, source_type, allow_capacity_overflow=True
-            )
-            for to_idx, target_route in enumerate(routes):
-                if to_idx == target_idx:
-                    continue
-                current_target_type_id = vehicle_ids[to_idx]
-                current_target_type = get_vehicle_type_by_id(problem, current_target_type_id)
-                target_ok, _, _, _, current_target_cost = evaluate_route_for_vehicle(
-                    problem, target_route, current_target_type
-                )
-                if not target_ok:
-                    continue
-                insert_pos, _ = choose_best_insertion_position(problem, target_route, customer)
-                candidate_target_route = normalize_route(target_route)
-                candidate_target_route.insert(insert_pos, customer)
-                type_usage = _type_usage_from_ids(vehicle_ids)
-                best_vehicle = assign_best_vehicle_for_existing_route(
-                    problem, candidate_target_route,
-                    current_type_id=current_target_type_id,
-                    type_usage=type_usage
-                )
-                if best_vehicle is None:
-                    continue
-                new_target_type_id, new_target_cost, _, _ = best_vehicle
-                delta_cost = (reduced_source_cost + new_target_cost) - (source_current_cost + current_target_cost)
-                move_key = (reduced_overflow > 1e-9, reduced_overflow, delta_cost, -problem.demands[customer], customer, to_idx)
-                if best_move is None or move_key < best_move[0]:
-                    best_move = (
-                        move_key,
-                        ("relocate", target_idx, to_idx, customer, reduced_route,
-                         candidate_target_route, new_target_type_id)
-                    )
-            type_usage = _type_usage_from_ids(vehicle_ids)
-            new_route = [0, customer, 0]
-            new_type_id = assign_best_feasible_vehicle_for_tour(problem, new_route, type_usage)
-            if new_type_id is not None:
-                new_type = get_vehicle_type_by_id(problem, new_type_id)
-                _, _, _, _, new_route_cost = evaluate_route_for_vehicle(problem, new_route, new_type)
-                delta_cost = (reduced_source_cost + new_route_cost) - source_current_cost
-                move_key = (reduced_overflow > 1e-9, reduced_overflow, delta_cost, -problem.demands[customer], customer, len(routes))
-                if best_move is None or move_key < best_move[0]:
-                    best_move = (
-                        move_key,
-                        ("new_route", target_idx, -1, customer, reduced_route, new_route, new_type_id)
-                    )
-        if best_move is not None:
-            _, move = best_move
-            move_kind, from_idx, to_idx, customer, reduced_route, target_route_after, new_type_id = move
-            routes[from_idx] = reduced_route
-            if move_kind == "relocate":
-                routes[to_idx] = target_route_after
-                old_target_type_id = vehicle_ids[to_idx]
-                vehicle_ids[to_idx] = new_type_id
-                if old_target_type_id != new_type_id:
-                    pass
-            else:
-                routes.append(target_route_after)
-                vehicle_ids.append(new_type_id)
-            if not route_core(reduced_route):
-                del routes[from_idx]
-                del vehicle_ids[from_idx]
-            continue
-        best_choice = None
-        for pos, customer in enumerate(source_core):
-            reduced_core = source_core[:pos] + source_core[pos + 1:]
-            reduced_route = [0] + reduced_core + [0]
-            reduced_overflow = max(0.0, problem.route_load(reduced_route) - source_type.capacity)
-            _, _, _, _, reduced_cost = evaluate_route_for_vehicle(
-                problem, reduced_route, source_type, allow_capacity_overflow=True
-            )
-            saving = source_current_cost - reduced_cost
-            choice_key = (reduced_overflow > 1e-9, reduced_overflow, -problem.demands[customer], -saving, pos, customer)
-            if best_choice is None or choice_key < best_choice[0]:
-                best_choice = (choice_key, pos, customer, reduced_route)
-        if best_choice is None:
-            return None
-        _, _, removed_customer, reduced_route = best_choice
-        routes[target_idx] = reduced_route
-        pending.append(removed_customer)
-        if not route_core(reduced_route):
-            del routes[target_idx]
-            del vehicle_ids[target_idx]
-    type_usage = _type_usage_from_ids(vehicle_ids)
-    if pending and not _apply_regret_insertion(
-            problem, routes, vehicle_ids, type_usage, pending,
-            deterministic=True, regret_k_override=3,
-            candidate_customer_limit=len(pending),
-            candidate_route_limit=max(len(routes), 1)):
-        return None
-    candidate = evaluate_solution(problem, routes, vehicle_ids)
-    return candidate if candidate.feasible else None
-
-
 def ruin_and_rebuild_routes(
         problem: HCVRPProblem, state: "SolutionState",
-        ruin_frac: float = 0.20, destroy_mode: str = "shaw",
-        stagnation_level: int = 0
+        ruin_frac: float = 0.20,
+        destroy_mode: str = "shaw",
+        bandit: Optional["DestroyBandit"] = None,
+        use_bandit: bool = True
 ) -> "SolutionState":
     customers = flatten_customers_from_routes(state.routes)
     n = len(customers)
     if n <= 2: return clone_solution_state(state)
     q       = max(1, int(ruin_frac * n))
-    removed = choose_destroy_customers(problem, state, q, destroy_mode)
+    mode    = bandit.select() if (bandit is not None and use_bandit) else destroy_mode
+    removed = choose_destroy_customers(problem, state, q, mode)
     routes  = remove_customers_from_routes(state.routes, removed)
     vehicle_ids: List[int] = []; type_usage: Dict[int, int] = {}
     for route in routes:
@@ -2075,19 +2332,21 @@ def ruin_and_rebuild_routes(
         if v_id is None: return clone_solution_state(state)
         vehicle_ids.append(v_id); type_usage[v_id] = type_usage.get(v_id, 0) + 1
     pending = list(removed)
-    soft_eval_kwargs = _rebuild_soft_eval_kwargs(stagnation_level)
-    soft_routes = clone_routes(routes)
-    soft_vehicle_ids = vehicle_ids[:]
-    soft_type_usage = dict(type_usage)
-    if _apply_regret_insertion(
-            problem, soft_routes, soft_vehicle_ids, soft_type_usage, pending[:],
-            soft_capacity=True, soft_eval_kwargs=soft_eval_kwargs):
-        repaired = repair_capacity_to_feasible(problem, soft_routes, soft_vehicle_ids)
-        if repaired is not None:
-            return repaired
     if not _apply_regret_insertion(problem, routes, vehicle_ids, type_usage, pending):
+        if bandit is not None and use_bandit:
+            bandit.update(mode, bandit.reward_value("fail", 0.0))
         return clone_solution_state(state)
-    return evaluate_solution(problem, routes, vehicle_ids)
+    result = evaluate_solution(problem, routes, vehicle_ids)
+    if bandit is not None and use_bandit:
+        improvement = max(0.0, state.total_cost - result.total_cost)
+        if result.hard_feasible and improvement > 1e-9:
+            reward = bandit.reward_value("improving", improvement)
+        elif result.feasible:
+            reward = bandit.reward_value("feasible", improvement)
+        else:
+            reward = bandit.reward_value("fail", 0.0)
+        bandit.update(mode, reward)
+    return result
 
 
 def route_elimination_phase(
@@ -2112,7 +2371,9 @@ def route_elimination_phase(
         del routes[target_idx]; del vehicle_ids[target_idx]
         type_usage  = _type_usage_from_ids(vehicle_ids)
         pending     = target_customers[:]
-        if not _apply_regret_insertion(problem, routes, vehicle_ids, type_usage, pending, allow_new_route=False):
+        if not _apply_regret_insertion(
+                problem, routes, vehicle_ids, type_usage, pending, allow_new_route=False
+        ):
             continue
         cs = evaluate_solution(problem, routes, vehicle_ids)
         if cs.feasible and cs.total_cost < best_state.total_cost: best_state = cs
@@ -2126,16 +2387,13 @@ def route_elimination_phase(
 def build_route_customer_sets(routes: Route_matrix) -> List[Set[int]]:
     return [set(route_core(r)) for r in routes]
 
-def build_customer_to_route_set_index(routes: Route_matrix) -> Dict[int, int]:
-    return {c: r_idx for r_idx, route in enumerate(routes) for c in route_core(route)}
-
 def select_path_relink_customers(
         current_state: "SolutionState", target_state: "SolutionState", max_customers: int = 20
 ) -> List[int]:
     current_sets = build_route_customer_sets(current_state.routes)
     target_sets  = build_route_customer_sets(target_state.routes)
-    current_map  = build_customer_to_route_set_index(current_state.routes)
-    target_map   = build_customer_to_route_set_index(target_state.routes)
+    current_map  = build_customer_to_route_map(current_state.routes)
+    target_map   = build_customer_to_route_map(target_state.routes)
     scored = []
     for customer in flatten_customers_from_routes(current_state.routes):
         cidx = current_map[customer]; tidx = target_map.get(customer)
@@ -2150,11 +2408,11 @@ def guided_customer_relocation(
         problem: HCVRPProblem, current_state: "SolutionState",
         target_state: "SolutionState", customer: int, max_target_routes: int = 4
 ) -> Optional["SolutionState"]:
-    current_routes    = clone_routes(current_state.routes)
+    current_routes      = clone_routes(current_state.routes)
     current_vehicle_ids = current_state.vehicle_ids[:]
-    current_map       = build_customer_to_route_map(current_routes)
-    target_route_sets = build_route_customer_sets(target_state.routes)
-    target_map        = build_customer_to_route_set_index(target_state.routes)
+    current_map         = build_customer_to_route_map(current_routes)
+    target_route_sets   = build_route_customer_sets(target_state.routes)
+    target_map          = build_customer_to_route_map(target_state.routes)
     from_idx  = current_map.get(customer); target_idx = target_map.get(customer)
     if from_idx is None or target_idx is None: return None
     target_group = target_route_sets[target_idx]
@@ -2202,8 +2460,7 @@ def elite_path_relink(
 
 def alpha_guided_rebuild(
         problem: HCVRPProblem, base_state: "SolutionState",
-        alpha_state: "SolutionState",
-        inherit_frac: float = 0.35, stagnation_level: int = 0
+        alpha_state: "SolutionState", inherit_frac: float = 0.35
 ) -> "SolutionState":
     base_routes     = clone_routes(base_state.routes)
     alpha_customers = flatten_customers_from_routes(alpha_state.routes)
@@ -2218,16 +2475,6 @@ def alpha_guided_rebuild(
         if v_id is None: return clone_solution_state(base_state)
         reduced_vehicle_ids.append(v_id); type_usage[v_id] = type_usage.get(v_id, 0) + 1
     pending = list(selected_customers)
-    soft_eval_kwargs = _rebuild_soft_eval_kwargs(stagnation_level)
-    soft_routes = clone_routes(reduced_routes)
-    soft_vehicle_ids = reduced_vehicle_ids[:]
-    soft_type_usage = dict(type_usage)
-    if _apply_regret_insertion(
-            problem, soft_routes, soft_vehicle_ids, soft_type_usage, pending[:],
-            soft_capacity=True, soft_eval_kwargs=soft_eval_kwargs):
-        repaired = repair_capacity_to_feasible(problem, soft_routes, soft_vehicle_ids)
-        if repaired is not None:
-            return repaired
     if not _apply_regret_insertion(problem, reduced_routes, reduced_vehicle_ids, type_usage, pending):
         return clone_solution_state(base_state)
     return evaluate_solution(problem, reduced_routes, reduced_vehicle_ids)
@@ -2238,11 +2485,7 @@ def alpha_guided_rebuild(
 # ==============================================================================
 
 def select_alpha_index(wolves: List[Wolf]) -> int:
-    alpha_costs = [
-        w.state.search_cost if w.state.feasible else w.best_state.total_cost + 1e9
-        for w in wolves
-    ]
-    cq = minmax_normalize_costs_to_quality(alpha_costs)
+    cq = minmax_normalize_costs_to_quality([w.state.total_cost for w in wolves])
     bq = minmax_normalize_values([w.blood for w in wolves])
     hq = minmax_normalize_values([w.best_quality_score for w in wolves])
     cw = float(ALGO_CONFIG["alpha_cost_weight"])
@@ -2255,19 +2498,6 @@ def select_alpha_index(wolves: List[Wolf]) -> int:
         if score > best_score: best_score = score; best_idx = i
     return best_idx
 
-
-def repair_wolves_after_free_search(wolves: List[Wolf]):
-    for wolf in wolves:
-        if wolf.state.feasible and wolf.state.capacity_overflow <= 1e-9:
-            continue
-        repaired = repair_capacity_to_feasible(wolf.problem, wolf.state.routes, wolf.state.vehicle_ids)
-        if repaired is not None:
-            wolf.state = wolf.clone_state(repaired)
-            if repaired.total_cost < wolf.best_state.total_cost:
-                wolf.best_state = wolf.clone_state(repaired)
-        else:
-            wolf.state = wolf.clone_state(wolf.best_state)
-
 def try_accept_neighbor(
         wolf: Wolf, candidate_state: "SolutionState",
         closed_regions: Optional[List[Set[Edge]]] = None,
@@ -2275,7 +2505,7 @@ def try_accept_neighbor(
         a: float = 1.5, b: float = 2.0, c: float = 1.0, b_par: float = 1.2,
         min_improve_gain: float = 0.10, quality_gain_weight: float = 0.50
 ) -> bool:
-    old_cost = wolf.state.search_cost; new_cost = candidate_state.search_cost
+    old_cost = wolf.state.total_cost; new_cost = candidate_state.total_cost
     raw_delta    = new_cost - old_cost
     scaled_delta = register_delta_and_get_scaled_delta(wolf, raw_delta)
     region_pen   = 0.0
@@ -2286,7 +2516,8 @@ def try_accept_neighbor(
     if raw_delta <= 0:
         prev_quality  = wolf.quality_score
         wolf.state    = wolf.clone_state(candidate_state)
-        if candidate_state.total_cost < wolf.best_state.total_cost:
+        # SO: best_state güncellemesi hard_feasible ile korunur
+        if candidate_state.hard_feasible and candidate_state.total_cost < wolf.best_state.total_cost:
             wolf.best_state = wolf.clone_state(candidate_state)
         standardized_improve = max(0.0, -scaled_delta)
         wolf.blood += min_improve_gain + standardized_improve + quality_gain_weight * prev_quality
@@ -2303,24 +2534,33 @@ def try_accept_neighbor(
 
 def explore_one_step(
         wolf: Wolf, closed_regions: Optional[List[Set[Edge]]] = None,
-        lambda_reg: float = 0.0, a: float = 1.5, b: float = 2.0, c: float = 1.0, b_par: float = 1.2
+        lambda_reg: float = 0.0, a: float = 1.5, b: float = 2.0,
+        c: float = 1.0, b_par: float = 1.2
 ):
-    soft_capacity = random.random() < float(ALGO_CONFIG["oscillation_probability"])
-    candidate_state = propose_random_neighbor(wolf.problem, wolf.state, soft_capacity=soft_capacity)
+    candidate_state = propose_random_neighbor(wolf.problem, wolf.state)
     try_accept_neighbor(wolf=wolf, candidate_state=candidate_state,
-                        closed_regions=closed_regions, lambda_reg=lambda_reg, a=a, b=b, c=c, b_par=b_par)
+                        closed_regions=closed_regions, lambda_reg=lambda_reg,
+                        a=a, b=b, c=c, b_par=b_par)
 
 def free_search_phase(
         wolves: List[Wolf], iterations_per_wolf: int = 200,
         closed_regions: Optional[List[Set[Edge]]] = None,
-        lambda_reg: float = 0.0, a: float = 1.5, b: float = 2.0, c: float = 1.0, b_par: float = 1.2
+        lambda_reg: float = 0.0, a: float = 1.5, b: float = 2.0,
+        c: float = 1.0, b_par: float = 1.2,
+        oscillation: Optional[OscillationController] = None   # SO: faz kontrolü
 ):
-    for _ in range(iterations_per_wolf):
+    update_interval = int(ALGO_CONFIG["free_search_quality_update_interval"])
+    for step in range(iterations_per_wolf):
+        # SO: her iterasyonda oscillation adımı — periyot dolunca faz değişir.
+        # Faz değişikliği _ACTIVE_OSCILLATION üzerinden evaluate fonksiyonlarını etkiler.
+        if oscillation is not None:
+            oscillation.step()
+
         for wolf in wolves:
             explore_one_step(wolf=wolf, closed_regions=closed_regions,
                              lambda_reg=lambda_reg, a=a, b=b, c=c, b_par=b_par)
-        update_population_quality_scores(wolves)
-    repair_wolves_after_free_search(wolves)
+        if (step + 1) % update_interval == 0:
+            update_population_quality_scores(wolves)
     update_population_quality_scores(wolves)
 
 def reset_wolves_for_new_hunt(wolves: List[Wolf], reserve_blood: float = 2.0, clear_history: bool = True):
@@ -2330,13 +2570,10 @@ def reset_wolves_for_new_hunt(wolves: List[Wolf], reserve_blood: float = 2.0, cl
 
 def hunt_one_wolf_towards_alpha(
         wolf: Wolf, guide_state: "SolutionState",
-        inherit_frac: float = 0.35, ruin_frac: float = 0.20,
-        rr_repeats: int = 2, stagnation_level: int = 0
+        inherit_frac: float = 0.35, ruin_frac: float = 0.20, rr_repeats: int = 2,
+        bandit: Optional["DestroyBandit"] = None
 ) -> "SolutionState":
-    current  = alpha_guided_rebuild(
-        wolf.problem, wolf.state, guide_state, inherit_frac,
-        stagnation_level=stagnation_level
-    )
+    current  = alpha_guided_rebuild(wolf.problem, wolf.state, guide_state, inherit_frac)
     current  = intensify_local_search(wolf.problem, current, max_rounds=3)
     relinked = elite_path_relink(wolf.problem, current, guide_state, max_steps=6)
     relinked = intensify_local_search(wolf.problem, relinked, max_rounds=2)
@@ -2345,8 +2582,7 @@ def hunt_one_wolf_towards_alpha(
     for _ in range(rr_repeats):
         candidate = ruin_and_rebuild_routes(
             wolf.problem, best, ruin_frac=ruin_frac,
-            destroy_mode=sample_destroy_mode(),
-            stagnation_level=stagnation_level
+            destroy_mode=sample_destroy_mode(), bandit=bandit, use_bandit=True
         )
         candidate = intensify_local_search(wolf.problem, candidate, max_rounds=3)
         if candidate.total_cost < best.total_cost: best = candidate
@@ -2355,8 +2591,8 @@ def hunt_one_wolf_towards_alpha(
 def hunt_around_alpha(
         wolves: List[Wolf], alpha_idx: int,
         elite_pool: Optional[List["SolutionState"]] = None,
-        inherit_frac: float = 0.35, ruin_frac: float = 0.20,
-        rr_repeats: int = 2, stagnation_level: int = 0
+        inherit_frac: float = 0.35, ruin_frac: float = 0.20, rr_repeats: int = 2,
+        bandit: Optional["DestroyBandit"] = None
 ) -> Tuple["SolutionState", float]:
     alpha           = wolves[alpha_idx]
     alpha_state     = alpha.best_state
@@ -2371,13 +2607,12 @@ def hunt_around_alpha(
         candidate = None
         for guide_state in guide_states:
             gc = hunt_one_wolf_towards_alpha(
-                wolf, guide_state, inherit_frac, ruin_frac, rr_repeats,
-                stagnation_level=stagnation_level
+                wolf, guide_state, inherit_frac, ruin_frac, rr_repeats, bandit=bandit
             )
             if candidate is None or gc.total_cost < candidate.total_cost: candidate = gc
         if candidate is None: continue
         wolf.update_if_better(candidate)
-        if candidate.total_cost < hunt_best_cost:
+        if candidate.hard_feasible and candidate.total_cost < hunt_best_cost:  # SO: hard_feasible
             hunt_best_state = alpha.clone_state(candidate); hunt_best_cost = candidate.total_cost
     alpha.update_if_better(hunt_best_state)
     update_population_quality_scores(wolves)
@@ -2400,15 +2635,38 @@ def run_bloodhound_hcvrp(
         reserve_blood: float = 2.0, lambda_reg: float = 0.30,
         a: float = 1.5, b: float = 2.0, c: float = 1.0, b_par: float = 1.2,
         inherit_frac: float = 0.35, ruin_frac: float = 0.20, rr_repeats: int = 2,
-        verbose: bool = True, random_seed: Optional[int] = None
+        verbose: bool = True, random_seed: Optional[int] = None,
+        # SO: Strategic Oscillation parametreleri (None → ALGO_CONFIG'ten alınır)
+        so_cap_penalty_weight: Optional[float] = None,
+        so_relax_period:       Optional[int]   = None,
+        so_enforce_period:     Optional[int]   = None,
 ) -> "SolutionState":
     if random_seed is not None: random.seed(random_seed)
+
+    # SO: OscillationController — parametreler verilmezse ALGO_CONFIG kullanılır
+    oscillation = OscillationController(
+        cap_penalty_weight=(so_cap_penalty_weight
+                            if so_cap_penalty_weight is not None
+                            else float(ALGO_CONFIG["so_cap_penalty_weight"])),
+        relax_period=(so_relax_period
+                      if so_relax_period is not None
+                      else int(ALGO_CONFIG["so_relax_period"])),
+        enforce_period=(so_enforce_period
+                        if so_enforce_period is not None
+                        else int(ALGO_CONFIG["so_enforce_period"])),
+    )
+
+    # SO: Başlangıçta oscillation kapalı (hard mod); sadece free_search'te aktif
+    set_active_oscillation(None)
+
     wolves      = initialize_wolves(problem, num_wolves)
     update_population_quality_scores(wolves)
     global_best = get_global_best_state(wolves)
     elite_pool  = update_elite_pool([], [w.best_state for w in wolves] + [global_best])
     closed_regions: List[Set[Edge]] = []
     hunts_without_global_improvement = 0
+
+    bandit = DestroyBandit(eps=float(ALGO_CONFIG["destroy_bandit_eps"]))
 
     if verbose:
         n_types = len(problem.vehicle_types)
@@ -2418,48 +2676,81 @@ def run_bloodhound_hcvrp(
         for vt in problem.vehicle_types:
             print(f"  Type {vt.type_id}: cap={vt.capacity}  cpm={vt.cost_per_km}  "
                   f"fc={vt.fixed_cost}  max={vt.max_count}")
+        print(f"SO cap_pw={oscillation.cap_penalty_weight}  "
+              f"relax_period={oscillation.relax_period}  "
+              f"enforce_period={oscillation.enforce_period}")
         print(f"Initial best cost: {round(global_best.total_cost, 4)}")
         print(f"Initial routes   : {route_count(global_best)}")
 
     for hunt_idx in range(num_hunts):
         reset_wolves_for_new_hunt(wolves, reserve_blood=reserve_blood, clear_history=True)
-        free_search_phase(wolves=wolves, iterations_per_wolf=explore_iterations,
-                          closed_regions=closed_regions, lambda_reg=lambda_reg,
-                          a=a, b=b, c=c, b_par=b_par)
+
+        # SO: free_search başlangıcında oscillation devreye alınır, ENFORCE'tan başlar
+        oscillation.set_phase("ENFORCE")
+        set_active_oscillation(oscillation)
+
+        free_search_phase(
+            wolves=wolves, iterations_per_wolf=explore_iterations,
+            closed_regions=closed_regions, lambda_reg=lambda_reg,
+            a=a, b=b, c=c, b_par=b_par,
+            oscillation=oscillation,    # SO: faz adımlaması için geçilir
+        )
+
+        # SO: Hunt ve LS aşamalarına geçmeden önce oscillation kapatılır (hard mod).
+        # Bu sayede araç ataması, regret insertion ve intensify_local_search
+        # her zaman hard kapasite kısıtı ile çalışır.
+        set_active_oscillation(None)
+
         alpha_idx = select_alpha_index(wolves)
         hunt_best_state, hunt_best_cost = hunt_around_alpha(
             wolves, alpha_idx, elite_pool, inherit_frac, ruin_frac, rr_repeats,
-            stagnation_level=hunts_without_global_improvement
+            bandit=bandit
         )
         if hunts_without_global_improvement >= int(ALGO_CONFIG["stagnation_hunt_limit"]):
             kick = stagnation_kick(
                 problem, hunt_best_state,
                 ruin_frac=min(float(ALGO_CONFIG["stagnation_ruin_cap"]),
                               ruin_frac + float(ALGO_CONFIG["stagnation_ruin_boost"])),
-                stagnation_level=hunts_without_global_improvement
+                bandit=bandit
             )
             if kick.feasible and kick.total_cost < hunt_best_cost:
                 hunt_best_state = kick; hunt_best_cost = kick.total_cost
+
         if hunt_best_cost < global_best.total_cost:
+            prev_global_best_cost = global_best.total_cost
             global_best = wolves[alpha_idx].clone_state(hunt_best_state)
+            if bandit.last_mode is not None:
+                bandit.update(
+                    bandit.last_mode,
+                    bandit.reward_value("global_best", max(0.0, prev_global_best_cost - hunt_best_cost))
+                )
             hunts_without_global_improvement = 0
         else:
             hunts_without_global_improvement += 1
+
         closed_regions.append(build_edge_signature_from_routes(hunt_best_state.routes))
         update_population_quality_scores(wolves)
         elite_pool = update_elite_pool(
             elite_pool, [w.best_state for w in wolves] + [hunt_best_state, global_best]
         )
+
         if verbose:
             c_min, c_mean, c_max = population_cost_stats(wolves)
+            so_s = oscillation.stats()
             print(
                 f"Hunt {hunt_idx+1}/{num_hunts} | alpha={alpha_idx} | "
                 f"hunt_best={hunt_best_cost:.4f} | global_best={global_best.total_cost:.4f} | "
                 f"hunt_routes={route_count(hunt_best_state)} | best_routes={route_count(global_best)} | "
                 f"pop_min={c_min:.4f} | pop_mean={c_mean:.4f} | pop_max={c_max:.4f} | "
                 f"stagnation={hunts_without_global_improvement} | "
-                f"closed_regions={len(closed_regions)} | elite_pool={len(elite_pool)}"
+                f"closed_regions={len(closed_regions)} | elite_pool={len(elite_pool)} | "
+                f"bandit={bandit.stats()} | "
+                f"so_relax={so_s['relax_entered']} so_enforce={so_s['enforce_entered']}"  # SO
             )
+
+    # SO: Çalışma bitti — oscillation kapalı bırakılır
+    set_active_oscillation(None)
+
     return global_best
 
 
@@ -2470,24 +2761,26 @@ def run_bloodhound_hcvrp(
 if __name__ == "__main__":
 
     SEARCH_PARAMS = {
-        "num_wolves":         8,
-        "num_hunts":          100,
-        "explore_iterations": 200,
+        "num_wolves":         10,
+        "num_hunts":          30,
+        "explore_iterations": 100,
         "reserve_blood":      2.5,
-        "lambda_reg":         1.0,
+        "lambda_reg":         1,
         "a":                  1.0,
         "b":                  2.0,
         "c":                  1.3,
         "b_par":              1.2,
-        "inherit_frac":       0.85,
-        "ruin_frac":          0.35,
+        "inherit_frac":       0.70,
+        "ruin_frac":          0.30,
         "rr_repeats":         5,
         "verbose":            True,
-        "random_seed":        42 ,
+        "random_seed":        666,
+        # SO: İsteğe bağlı override — None bırakılırsa ALGO_CONFIG değerleri kullanılır
+        "so_cap_penalty_weight": None,
+        "so_relax_period":       None,
+        "so_enforce_period":     None,
     }
 
-    # ── Dataset yükleme ───────────────────────────────────────────────────────
-    # Seçenek 1: Script klasöründeki .txt dosyasını otomatik bul
     DATASET_DIR  = Path(__file__).resolve().parent / "Test_data"
     DATASET_FILE = DATASET_DIR / "X200-HD.txt"
 
@@ -2507,9 +2800,9 @@ if __name__ == "__main__":
     print("\n===== FINAL BEST =====")
     print("Instance   :", getattr(problem, "original_vrplib_name", "?"))
     print("Feasible   :", best_state.feasible)
+    print("Hard Feas. :", best_state.hard_feasible)
     print("Route count:", route_count(best_state))
     print("Total cost :", round(best_state.total_cost, 4))
-    # Tip bazlı özet
     type_counts = Counter(best_state.vehicle_ids)
     print("Type usage :", {f"type{t}(cap={problem.vehicle_types[t].capacity})": c
                            for t, c in sorted(type_counts.items())})
@@ -2517,4 +2810,4 @@ if __name__ == "__main__":
     print("Route dist :", best_state.route_distances)
     print("Route costs:", best_state.route_costs)
     for i, route in enumerate(best_state.routes):
-        print(f"  Route {i:2d} [type{best_state.vehicle_ids[i]}]: {route}")
+        print(f"  Route {i:2d} [type{best_state.vehicle_ids[i]}]: {route_to_original_ids(problem, route)}")
