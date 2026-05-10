@@ -1737,29 +1737,6 @@ def random_safe_inter_route_relocate(problem: HCVRPProblem, state: "SolutionStat
                 return delta_candidate
     return candidate
 
-def random_inter_route_swap(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
-    candidate = clone_solution_state(state)
-    eligible  = [i for i, r in enumerate(candidate.routes) if route_core(r)]
-    if len(eligible) < 2: return candidate
-    r1, r2  = random.sample(eligible, 2)
-    core1   = route_core(candidate.routes[r1]); core2 = route_core(candidate.routes[r2])
-    p1 = random.randint(0, len(core1) - 1); p2 = random.randint(0, len(core2) - 1)
-    core1[p1], core2[p2] = core2[p2], core1[p1]
-    candidate.routes[r1] = [0] + core1 + [0]; candidate.routes[r2] = [0] + core2 + [0]
-    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
-
-def random_double_bridge_move(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
-    candidate = clone_solution_state(state)
-    eligible  = [i for i, r in enumerate(candidate.routes) if len(route_core(r)) >= 8]
-    if not eligible: return candidate
-    r_idx = random.choice(eligible); core = route_core(candidate.routes[r_idx])
-    cuts = sorted(random.sample(range(1, len(core)), 4))
-    a, b, c, d = cuts
-    s1, s2, s3, s4, s5 = core[:a], core[a:b], core[b:c], core[c:d], core[d:]
-    new_core = s1 + s4 + s3 + s2 + s5
-    candidate.routes[r_idx] = [0] + new_core + [0]
-    return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
-
 def random_inter_route_2opt_star(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
     candidate = clone_solution_state(state)
     eligible  = [i for i, r in enumerate(candidate.routes) if len(route_core(r)) >= 2]
@@ -2125,102 +2102,6 @@ def best_improving_outlier_relocate(
     return clone_solution_state(state)
 
 
-def best_improving_ejection_chain(
-        problem: HCVRPProblem, state: "SolutionState",
-        max_source_routes: int = 4, max_target_routes: int = 4,
-        max_outliers_per_route: int = 2, max_eject_per_target: int = 2
-) -> "SolutionState":
-    best_state = clone_solution_state(state)
-    route_centroids = compute_route_centroids(problem, state.routes)
-    route_arrays = _routes_to_numpy(state.routes) if (NUMBA_AVAILABLE and np is not None) else None
-    source_scores = []
-    for r_idx, route in enumerate(state.routes):
-        core = route_core(route)
-        if len(core) < 3:
-            continue
-        route_arr = route_arrays[r_idx] if route_arrays is not None else None
-        source_scores.append((route_spread_value(problem, route, route_arr=route_arr), state.route_costs[r_idx], r_idx))
-    source_scores.sort(key=lambda x: (-x[0], -x[1], x[2]))
-
-    for _, _, from_idx in source_scores[:max_source_routes]:
-        from_route = state.routes[from_idx]
-        from_route_arr = route_arrays[from_idx] if route_arrays is not None else None
-        for customer in rank_route_outliers(problem, from_route, max_outliers_per_route, route_arr=from_route_arr):
-            target_indices = [
-                r_idx for r_idx in select_candidate_route_indices(
-                    problem, state.routes, customer, max_candidates=max_target_routes,
-                    route_centroids=route_centroids, route_arrays=route_arrays
-                )
-                if r_idx != from_idx
-            ]
-            for to_idx in target_indices:
-                target_route = state.routes[to_idx]
-                target_route_arr = route_arrays[to_idx] if route_arrays is not None else None
-                eject_candidates = rank_route_outliers(problem, target_route, max_eject_per_target, route_arr=target_route_arr)
-                for eject_customer in eject_candidates:
-                    from_core = route_core(state.routes[from_idx])
-                    to_core = route_core(state.routes[to_idx])
-                    if customer not in from_core or eject_customer not in to_core:
-                        continue
-                    reduced_from = [n for n in from_core if n != customer]
-                    reduced_target = [n for n in to_core if n != eject_customer]
-                    insert_pos, _ = choose_best_insertion_position(problem, [0] + reduced_target + [0], customer)
-                    reduced_target.insert(insert_pos - 1, customer)
-
-                    base_routes = clone_routes(state.routes)
-                    base_routes[from_idx] = [0] + reduced_from + [0]
-                    base_routes[to_idx] = [0] + reduced_target + [0]
-                    base_routes, base_vehicle_ids = remove_empty_routes(base_routes, state.vehicle_ids[:])
-
-                    route_centroids = compute_route_centroids(problem, base_routes)
-                    inserted = False
-                    third_targets = select_candidate_route_indices(
-                        problem, base_routes, eject_customer, max_candidates=max_target_routes,
-                        route_centroids=route_centroids
-                    )
-                    for third_idx in third_targets:
-                        target_core = route_core(base_routes[third_idx])
-                        ins_pos, _ = choose_best_insertion_position(problem, base_routes[third_idx], eject_customer)
-                        new_routes = clone_routes(base_routes)
-                        target_core = route_core(new_routes[third_idx])
-                        target_core.insert(ins_pos - 1, eject_customer)
-                        new_routes[third_idx] = [0] + target_core + [0]
-                        cs = evaluate_solution(problem, new_routes, base_vehicle_ids[:])
-                        if cs.feasible:
-                            inserted = True
-                            if cs.total_cost < best_state.total_cost:
-                                best_state = cs
-                            break
-                    if inserted:
-                        continue
-    return best_state
-
-
-def best_improving_inter_route_swap(
-        problem: HCVRPProblem, state: "SolutionState", max_pairs: int = 6
-) -> "SolutionState":
-    best_state = clone_solution_state(state)
-    for r1, r2 in select_promising_route_pairs(problem, state.routes, max_pairs=max_pairs):
-        core1 = route_core(state.routes[r1]); core2 = route_core(state.routes[r2])
-        if not core1 or not core2:
-            continue
-        for i, c1 in enumerate(core1):
-            for j, c2 in enumerate(core2):
-                nr1 = core1[:]
-                nr2 = core2[:]
-                nr1[i], nr2[j] = c2, c1
-                candidate = evaluate_fixed_vehicle_route_delta(
-                    problem, state,
-                    {
-                        r1: [0] + nr1 + [0],
-                        r2: [0] + nr2 + [0],
-                    },
-                )
-                if candidate is not None and candidate.feasible and candidate.total_cost < best_state.total_cost:
-                    best_state = candidate
-    return best_state
-
-
 def best_improving_two_customer_relocate(
         problem: HCVRPProblem, state: "SolutionState", max_pairs: int = 6
 ) -> "SolutionState":
@@ -2330,46 +2211,6 @@ def best_improving_or_opt(
                     )
                     if candidate.feasible and candidate.total_cost < best_state.total_cost:
                         best_state = candidate
-    return best_state
-
-
-def best_improving_double_bridge_move(
-        problem: HCVRPProblem, state: "SolutionState", max_routes: int = 3
-) -> "SolutionState":
-    best_state = clone_solution_state(state)
-    candidates = [
-        (state.route_costs[r], r)
-        for r, route in enumerate(state.routes) if len(route_core(route)) >= 8
-    ]
-    candidates.sort(key=lambda x: (-x[0], x[1]))
-    for _, r_idx in candidates[:max_routes]:
-        core = route_core(state.routes[r_idx])
-        vt = get_vehicle_type_by_id(problem, state.vehicle_ids[r_idx])
-        cut_positions = evenly_spaced_positions(1, len(core), 6)
-        if len(cut_positions) < 4:
-            continue
-        seen = set()
-        for a_idx in range(len(cut_positions) - 3):
-            for b_idx in range(a_idx + 1, len(cut_positions) - 2):
-                for c_idx in range(b_idx + 1, len(cut_positions) - 1):
-                    for d_idx in range(c_idx + 1, len(cut_positions)):
-                        a, b, c, d = cut_positions[a_idx], cut_positions[b_idx], cut_positions[c_idx], cut_positions[d_idx]
-                        if (a, b, c, d) in seen:
-                            continue
-                        seen.add((a, b, c, d))
-                        s1, s2, s3, s4, s5 = core[:a], core[a:b], core[b:c], core[c:d], core[d:]
-                        new_core = s1 + s4 + s3 + s2 + s5
-                        new_route = [0] + new_core + [0]
-                        rok, load, dist, route_time, route_cost = evaluate_route_for_vehicle(
-                            problem, new_route, vt
-                        )
-                        if not rok:
-                            continue
-                        candidate = clone_state_with_updated_route(
-                            state, r_idx, new_route, load, dist, route_time, route_cost
-                        )
-                        if candidate.feasible and candidate.total_cost < best_state.total_cost:
-                            best_state = candidate
     return best_state
 
 
