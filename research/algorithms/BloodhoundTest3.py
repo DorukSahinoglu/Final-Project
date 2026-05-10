@@ -332,50 +332,58 @@ def _rank_route_outliers_numba(
 # ==============================================================================
 
 ALGO_CONFIG = {
-    "alpha_cost_weight":                     0.68,
-    "alpha_blood_weight":                    0.12,
-    "alpha_history_weight":                  0.20,
+    "alpha_cost_weight":                     0.82,
+    "alpha_blood_weight":                    0.04,
+    "alpha_history_weight":                  0.14,
     "elite_pool_max_size":                   6,
     "elite_max_similarity":                  0.90,
-    "regret3_probability":                   0.50,
+    "regret3_probability":                   0.35,
     "destroy_prob_shaw":                     0.35,
     "destroy_prob_worst":                    0.25,
     "destroy_prob_targeted":                 0.25,
-    "targeted_destroy_neighbor_routes":      2,
+    "targeted_destroy_neighbor_routes":      4,
     "route_elimination_max_routes":          2,
-    "stagnation_hunt_limit":                 2,
-    "stagnation_ruin_boost":                 0.15,
-    "stagnation_ruin_cap":                   0.45,
+    "stagnation_hunt_limit":                 1,
+    "stagnation_ruin_boost":                 0.20,
+    "stagnation_ruin_cap":                   0.55,
     "adaptive_small_route_count":            15,
     "adaptive_medium_route_count":           25,
     "adaptive_dense_route_threshold":        8.5,
     "adaptive_medium_route_threshold":       6.5,
-    "free_search_quality_update_interval":   10,
-    "destroy_bandit_eps":                    0.15,
+    "free_search_quality_update_interval":   4,
+    "destroy_bandit_eps":                    0.06,
     "granular_neighbor_k":                   18,
-    "granular_route_boost_weight":           4.0,
-    "insertion_centroid_penalty_weight":     0.18,
-    "insertion_outlier_penalty_weight":      0.50,
-    "insertion_load_penalty_threshold":      0.86,
-    "insertion_load_penalty_weight":         320.0,
-    "outlier_source_routes":                 6,
-    "outlier_target_routes":                 6,
-    "outlier_customers_per_route":           3,
-    "ejection_target_routes":                4,
-    "ejection_candidates_per_route":         2,
-    "cluster_rebuild_bad_routes":            3,
-    "cluster_rebuild_neighbor_routes":       2,
-    "cluster_rebuild_max_routes":            5,
-    "route_surgery_max_targets":             2,
-    "route_surgery_neighbor_routes":         2,
-    "route_surgery_max_routes":              4,
-    "outlier_purge_routes":                  3,
-    "outlier_purge_customers_per_route":     3,
+    "granular_route_boost_weight":           5.0,
+    "insertion_centroid_penalty_weight":     0.22,
+    "insertion_outlier_penalty_weight":      0.65,
+    "insertion_load_penalty_threshold":      0.82,
+    "insertion_load_penalty_weight":         420.0,
+    "outlier_source_routes":                 7,
+    "outlier_target_routes":                 7,
+    "outlier_customers_per_route":           4,
+    "ejection_target_routes":                5,
+    "ejection_candidates_per_route":         3,
+    "cluster_rebuild_bad_routes":            4,
+    "cluster_rebuild_neighbor_routes":       3,
+    "cluster_rebuild_max_routes":            6,
+    "route_surgery_max_targets":             3,
+    "route_surgery_neighbor_routes":         3,
+    "route_surgery_max_routes":              5,
+    "micro_lns_neighbor_routes":             2,
+    "micro_lns_extra_routes":                1,
+    "micro_lns_attempts":                    7,
+    "full_moon_bad_routes":                  2,
+    "full_moon_neighbor_routes":             2,
+    "full_moon_max_routes":                  4,
+    "full_moon_attempts":                    5,
+    "full_moon_post_ls_rounds":              1,
+    "outlier_purge_routes":                  4,
+    "outlier_purge_customers_per_route":     4,
     "targeted_rebuild_attempts":             5,
     "targeted_cleanup_spread_sigma":         1.0,
     "targeted_cleanup_distance_sigma":       1.25,
-    "targeted_cleanup_cost_slack":           260.0,
-    "targeted_cleanup_badness_gain":         120.0,
+    "targeted_cleanup_cost_slack":           520.0,
+    "targeted_cleanup_badness_gain":         60.0,
     "targeted_cleanup_neighbor_routes":      2,
     "targeted_cleanup_extra_routes":         2,
     "bandit_reaction_factor":                0.30,
@@ -384,14 +392,14 @@ ALGO_CONFIG = {
     "bandit_reward_feasible":                1.5,
     "bandit_reward_fail":                    0.1,
     "bandit_mode_score_floor":               0.20,
-    "bandit_prior_shaw":                     1.00,
-    "bandit_prior_worst":                    1.10,
-    "bandit_prior_targeted":                 2.40,
-    "bandit_prior_route":                    1.35,
-    "bandit_pathology_bias_prob":            0.55,
-    "bandit_pathology_bonus_weight":         0.045,
-    "bandit_targeted_bonus_mult":            1.35,
-    "bandit_route_bonus_mult":               1.15,
+    "bandit_prior_shaw":                     0.80,
+    "bandit_prior_worst":                    0.90,
+    "bandit_prior_targeted":                 4.80,
+    "bandit_prior_route":                    1.10,
+    "bandit_pathology_bias_prob":            0.90,
+    "bandit_pathology_bonus_weight":         0.090,
+    "bandit_targeted_bonus_mult":            2.10,
+    "bandit_route_bonus_mult":               1.10,
     # SO: Strategic Oscillation parametreleri
     "so_cap_penalty_weight":                 300.0,   # birim kapasite aşımı başına ceza
     "so_relax_period":                       25,      # RELAX fazında kalınacak adım sayısı
@@ -497,6 +505,12 @@ def _route_to_numpy(route: Route):
     if isinstance(route, np.ndarray):
         return route
     return np.asarray(route, dtype=np.int64)
+
+
+def _routes_to_numpy(routes: Route_matrix):
+    if np is None:
+        return routes
+    return [_route_to_numpy(route) for route in routes]
 
 
 @dataclass
@@ -734,8 +748,21 @@ def _parse_vrplib_lines(
 
     capacities:     List[float] = [float(e.split()[1]) for e in sections["CAPACITY_SECTION"]]
     variable_costs: List[float] = [float(e.split()[1]) for e in sections["VEHICLES_UNIT_DISTANCE_COST_SECTION"]]
-    fixed_costs:    List[float] = [float(e.split()[1]) for e in sections["VEHICLES_FIXED_COST_SECTION"]] \
+    fixed_cost_entries = sections["VEHICLES_FIXED_COST_SECTION"]
+    fixed_costs:    List[float] = [float(e.split()[1]) for e in fixed_cost_entries] \
                                   or [0.0] * len(capacities)
+    has_explicit_fixed_costs = len(fixed_cost_entries) > 0
+    uses_scaled_fixed_costs = (
+        has_explicit_fixed_costs
+        and "FSMF" in metadata.get("NAME", source_name).upper()
+        and len(variable_costs) > 0
+        and min(variable_costs) >= 10.0
+        and min(fixed_costs) >= 1000.0
+    )
+    cost_scale_factor = 100.0 if uses_scaled_fixed_costs else 1.0
+    if cost_scale_factor != 1.0:
+        variable_costs = [v / cost_scale_factor for v in variable_costs]
+        fixed_costs = [f / cost_scale_factor for f in fixed_costs]
 
     if len(raw_demands) != dimension:
         raise ValueError("DEMAND_SECTION ile DIMENSION uyusmuyor")
@@ -763,18 +790,22 @@ def _parse_vrplib_lines(
     demands    = [raw_demands[old] for old in order]; demands[0] = 0.0
     dist       = [[raw_dist[oi][oj] for oj in order] for oi in order]
 
-    if benchmark_compatible_hfvrp_costs and not any(fc != 0.0 for fc in fixed_costs):
+    use_benchmark_compatible_hd_costs = benchmark_compatible_hfvrp_costs and not has_explicit_fixed_costs
+
+    if use_benchmark_compatible_hd_costs:
         vehicles = [
             Vehicle(vehicle_id=i, capacity=capacities[i], cost_per_km=1.0,
                     fixed_cost=variable_costs[i], speed=1.0)
             for i in range(len(capacities))
         ]
+        cost_model_name = "benchmark_compatible_hd"
     else:
         vehicles = [
             Vehicle(vehicle_id=i, capacity=capacities[i], cost_per_km=variable_costs[i],
                     fixed_cost=fixed_costs[i], speed=1.0)
             for i in range(len(capacities))
         ]
+        cost_model_name = "explicit_fixed_and_distance"
 
     problem = HCVRPProblem(
         coords=coords, demands=demands, vehicles=vehicles,
@@ -785,6 +816,9 @@ def _parse_vrplib_lines(
     problem.original_vrplib_name      = metadata.get("NAME", source_name)  # type: ignore
     problem.original_vrplib_depot_id  = depot_vrplib_id                    # type: ignore
     problem.original_to_internal_node = old_to_new                         # type: ignore
+    problem.cost_model_name           = cost_model_name                    # type: ignore
+    problem.has_explicit_fixed_costs  = has_explicit_fixed_costs           # type: ignore
+    problem.cost_scale_factor         = cost_scale_factor                  # type: ignore
     return problem
 
 
@@ -847,7 +881,7 @@ def route_has_duplicate_customer(route: Route) -> bool:
 def build_edge_signature_from_routes(routes: Route_matrix) -> Set[Edge]:
     sig: Set[Edge] = set()
     for route in routes:
-        nr = normalize_route(route)
+        nr = _ensure_normalized(route)
         for i in range(len(nr) - 1):
             a, b = nr[i], nr[i + 1]
             sig.add((a, b) if a < b else (b, a))
@@ -1043,11 +1077,11 @@ def evaluate_solution(
     if len(routes) != len(vehicle_ids):
         raise ValueError("Routes ve vehicle_ids uzunluğu aynı olmalı")
 
-    normalized_routes = [normalize_route(r) for r in routes]
+    normalized_routes = [_ensure_normalized(r) for r in routes]
     normalized_route_arrays = None
     covered_customers = None
     if NUMBA_AVAILABLE and np is not None:
-        normalized_route_arrays = [_route_to_numpy(route) for route in normalized_routes]
+        normalized_route_arrays = _routes_to_numpy(normalized_routes)
         covered_customers = np.zeros(problem.n_nodes, dtype=np.uint8)
 
     # SO: aktif oscillation → soft cap ağırlığı belirle
@@ -1170,13 +1204,14 @@ def assign_best_feasible_vehicle_for_tour(
         route: Route,
         type_usage: Dict[int, int]
 ) -> Optional[int]:
+    nr = _ensure_normalized(route)
     if NUMBA_AVAILABLE and np is not None:
         usage_counts = np.zeros(len(problem.vehicle_types), dtype=np.int64)
         for type_id, count in type_usage.items():
             usage_counts[type_id] = count
         # Araç ataması her zaman hard — numba kernel doğrudan çağrılır
         best_type_id, _, _ = _best_vehicle_type_for_route_numba(
-            _route_to_numpy(normalize_route(route)),
+            _route_to_numpy(nr),
             problem.dist_np, problem.demands_np,
             problem.time_window_open_np, problem.time_window_close_np,
             problem.service_times_np,
@@ -1189,12 +1224,12 @@ def assign_best_feasible_vehicle_for_tour(
         )
         return None if best_type_id < 0 else int(best_type_id)
 
-    load = problem.route_load(route)
+    load = problem.route_load(nr)
     candidates = []
     for vt in problem.vehicle_types:
         if not _can_open_more(type_usage, vt): continue
         if vt.capacity < load:                  continue
-        route_ok, _, rd, _, rc = evaluate_route_for_vehicle(problem, route, vt)
+        route_ok, _, rd, _, rc = evaluate_route_for_vehicle(problem, nr, vt)
         if route_ok: candidates.append((rc, rd, vt.capacity, vt.type_id))
     if not candidates: return None
     return min(candidates)[3]
@@ -1206,12 +1241,13 @@ def assign_best_vehicle_for_existing_route(
         current_type_id: int,
         type_usage: Dict[int, int]
 ) -> Optional[Tuple[int, float, float]]:
+    nr = _ensure_normalized(route)
     if NUMBA_AVAILABLE and np is not None:
         usage_counts = np.zeros(len(problem.vehicle_types), dtype=np.int64)
         for type_id, count in type_usage.items():
             usage_counts[type_id] = count
         best_type_id, best_cost, best_dist = _best_vehicle_type_for_route_numba(
-            _route_to_numpy(normalize_route(route)),
+            _route_to_numpy(nr),
             problem.dist_np, problem.demands_np,
             problem.time_window_open_np, problem.time_window_close_np,
             problem.service_times_np,
@@ -1230,7 +1266,7 @@ def assign_best_vehicle_for_existing_route(
     for vt in problem.vehicle_types:
         if vt.type_id != current_type_id:
             if not _can_open_more(type_usage, vt): continue
-        route_ok, _, rd, _, rc = evaluate_route_for_vehicle(problem, route, vt)
+        route_ok, _, rd, _, rc = evaluate_route_for_vehicle(problem, nr, vt)
         if route_ok: candidates.append((rc, rd, vt.capacity, vt.type_id))
     if not candidates: return None
     bc, bd, _, bt = min(candidates)
@@ -1240,9 +1276,9 @@ def assign_best_vehicle_for_existing_route(
 def can_append_customer_to_route(
         problem: HCVRPProblem, route: Route, customer: int, vehicle: VehicleType
 ) -> bool:
-    if problem.route_load(normalize_route(route)) + problem.demands[customer] > vehicle.capacity:
+    nr = _ensure_normalized(route)
+    if problem.route_load(nr) + problem.demands[customer] > vehicle.capacity:
         return False
-    nr  = normalize_route(route)
     pos = best_append_position_by_distance(problem, nr, customer)
     candidate = nr[:]
     candidate.insert(pos, customer)
@@ -1271,17 +1307,19 @@ def find_best_route_insertion(
 ) -> Optional[Tuple]:
     best_choice = None
     route_centroids = compute_route_centroids(problem, routes) if routes else []
+    route_arrays = _routes_to_numpy(routes) if (routes and NUMBA_AVAILABLE and np is not None) else None
     for r_idx in select_candidate_route_indices(
             problem, routes, customer,
             max_candidates=max(1, min(len(routes), int(ALGO_CONFIG["granular_neighbor_k"]) // 2 or 1)),
-            route_centroids=route_centroids) if routes else []:
+            route_centroids=route_centroids,
+            route_arrays=route_arrays) if routes else []:
         route = routes[r_idx]
         current_type_id = vehicle_ids[r_idx]
         current_type    = get_vehicle_type_by_id(problem, current_type_id)
         route_ok, _, _, _, current_cost = evaluate_route_for_vehicle(problem, route, current_type)
         if not route_ok: continue
         pos, _          = choose_best_insertion_position(problem, route, customer)
-        candidate_route = normalize_route(route); candidate_route.insert(pos, customer)
+        candidate_route = _ensure_normalized(route)[:]; candidate_route.insert(pos, customer)
         best_vehicle    = assign_best_vehicle_for_existing_route(
             problem, candidate_route, current_type_id=current_type_id, type_usage=type_usage
         )
@@ -1326,12 +1364,14 @@ def generate_feasible_solution(
             if best_choice is not None:
                 r_idx, pos, new_type_id, _ = best_choice
                 old_type_id = vehicle_ids[r_idx]
-                nr = normalize_route(routes[r_idx]); nr.insert(pos, customer)
-                routes[r_idx]      = nr
+                nr = _ensure_normalized(routes[r_idx])[:]
+                nr.insert(pos, customer)
+                routes[r_idx] = nr
                 vehicle_ids[r_idx] = new_type_id
                 if old_type_id != new_type_id:
                     type_usage[old_type_id] -= 1
-                    if type_usage[old_type_id] <= 0: del type_usage[old_type_id]
+                    if type_usage[old_type_id] <= 0:
+                        del type_usage[old_type_id]
                     type_usage[new_type_id] = type_usage.get(new_type_id, 0) + 1
                 placed = True
 
@@ -1463,6 +1503,44 @@ def clone_state_with_updated_route(
     candidate.hard_feasible = state.hard_feasible
     return candidate
 
+
+def clone_state_with_updated_routes(
+        state: "SolutionState",
+        route_updates: List[Tuple[int, Route, float, float, float, float]]
+) -> "SolutionState":
+    candidate = clone_solution_state(state)
+    total_cost = state.total_cost
+    for route_idx, new_route, route_load, route_dist, route_time, route_cost in route_updates:
+        candidate.routes[route_idx] = _ensure_normalized(new_route)
+        candidate.route_loads[route_idx] = route_load
+        candidate.route_distances[route_idx] = route_dist
+        candidate.route_times[route_idx] = route_time
+        candidate.route_costs[route_idx] = route_cost
+        total_cost += route_cost - state.route_costs[route_idx]
+    candidate.total_cost = total_cost
+    candidate.feasible = state.feasible
+    candidate.hard_feasible = state.hard_feasible
+    return candidate
+
+
+def evaluate_fixed_vehicle_route_delta(
+        problem: HCVRPProblem,
+        state: "SolutionState",
+        route_updates: Dict[int, Route]
+) -> Optional["SolutionState"]:
+    evaluated_updates: List[Tuple[int, Route, float, float, float, float]] = []
+    for route_idx, new_route in route_updates.items():
+        vt = get_vehicle_type_by_id(problem, state.vehicle_ids[route_idx])
+        route_ok, route_load, route_dist, route_time, route_cost = evaluate_route_for_vehicle(
+            problem, new_route, vt
+        )
+        if not route_ok:
+            return None
+        evaluated_updates.append(
+            (route_idx, new_route, route_load, route_dist, route_time, route_cost)
+        )
+    return clone_state_with_updated_routes(state, evaluated_updates)
+
 def state_edge_similarity(a: "SolutionState", b: "SolutionState") -> float:
     sa = build_edge_signature_from_routes(a.routes)
     sb = build_edge_signature_from_routes(b.routes)
@@ -1507,7 +1585,7 @@ def remove_empty_routes(
 ) -> Tuple[Route_matrix, List[int]]:
     new_routes = []; new_vehicle_ids = []
     for route, v_id in zip(routes, vehicle_ids):
-        nr = normalize_route(route)
+        nr = _ensure_normalized(route)
         if route_core(nr): new_routes.append(nr); new_vehicle_ids.append(v_id)
     return new_routes, new_vehicle_ids
 
@@ -1601,6 +1679,64 @@ def random_inter_route_relocate(problem: HCVRPProblem, state: "SolutionState") -
     candidate.routes, candidate.vehicle_ids = remove_empty_routes(candidate.routes, candidate.vehicle_ids)
     return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
 
+
+def random_safe_inter_route_relocate(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
+    candidate = clone_solution_state(state)
+    non_empty = [i for i, r in enumerate(candidate.routes) if len(route_core(r)) >= 2]
+    if not non_empty:
+        return candidate
+
+    route_centroids = compute_route_centroids(problem, candidate.routes)
+    route_arrays = _routes_to_numpy(candidate.routes) if (NUMBA_AVAILABLE and np is not None) else None
+    source_order = non_empty[:]
+    random.shuffle(source_order)
+
+    for from_idx in source_order:
+        from_route = candidate.routes[from_idx]
+        from_core = route_core(from_route)
+        if not from_core:
+            continue
+        customer = random.choice(from_core)
+        reduced_core = [n for n in from_core if n != customer]
+        candidate_targets = [
+            r_idx for r_idx in select_candidate_route_indices(
+                problem,
+                candidate.routes,
+                customer,
+                max_candidates=min(4, max(1, len(candidate.routes) - 1)),
+                route_centroids=route_centroids,
+                route_arrays=route_arrays,
+            )
+            if r_idx != from_idx
+        ]
+        random.shuffle(candidate_targets)
+        for to_idx in candidate_targets:
+            if state.route_loads[to_idx] + problem.demands[customer] > problem.max_vehicle_capacity:
+                continue
+            to_route = candidate.routes[to_idx]
+            insert_pos, _ = choose_best_insertion_position(problem, to_route, customer)
+            to_core = route_core(to_route)
+            to_core.insert(insert_pos - 1, customer)
+            new_to_route = [0] + to_core + [0]
+            if reduced_core:
+                delta_candidate = evaluate_fixed_vehicle_route_delta(
+                    problem,
+                    state,
+                    {
+                        from_idx: [0] + reduced_core + [0],
+                        to_idx: new_to_route,
+                    },
+                )
+            else:
+                cr = clone_routes(state.routes)
+                cr[from_idx] = [0] + reduced_core + [0]
+                cr[to_idx] = new_to_route
+                cr, cv = remove_empty_routes(cr, state.vehicle_ids[:])
+                delta_candidate = evaluate_solution(problem, cr, cv)
+            if delta_candidate is not None and delta_candidate.feasible:
+                return delta_candidate
+    return candidate
+
 def random_inter_route_swap(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
     candidate = clone_solution_state(state)
     eligible  = [i for i, r in enumerate(candidate.routes) if route_core(r)]
@@ -1663,10 +1799,28 @@ def random_vehicle_reassignment(problem: HCVRPProblem, state: "SolutionState") -
     return evaluate_solution(problem, candidate.routes, candidate.vehicle_ids)
 
 def propose_random_neighbor(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
-    return random.choice([
-        random_intra_route_2opt, random_inter_route_relocate,
-        random_inter_route_2opt_star, random_double_bridge_move, random_vehicle_reassignment
-    ])(problem, state)
+    profile = get_problem_scale_profile(problem, active_route_count=max(1, len(state.routes)))
+    if profile.get("long_route_mode", False):
+        operators = [
+            random_intra_route_2opt,
+            random_safe_inter_route_relocate,
+            random_vehicle_reassignment,
+        ]
+    else:
+        operators = [
+            random_intra_route_2opt,
+            random_inter_route_relocate,
+            random_inter_route_2opt_star,
+            random_vehicle_reassignment,
+        ]
+
+    fallback = clone_solution_state(state)
+    for _ in range(3):
+        candidate = random.choice(operators)(problem, state)
+        if candidate.feasible:
+            return candidate
+        fallback = candidate
+    return fallback
 
 
 # ==============================================================================
@@ -1754,11 +1908,12 @@ def select_promising_route_pairs(
 def compute_route_centroids(problem: HCVRPProblem, routes: Route_matrix) -> List[Point]:
     if NUMBA_AVAILABLE and np is not None:
         depot_x, depot_y = problem.coords[0]
+        route_arrays = _routes_to_numpy(routes)
         return [
             _compute_route_centroid_numba(
-                _route_to_numpy(route), problem.coords_np, depot_x, depot_y
+                route_arr, problem.coords_np, depot_x, depot_y
             )
-            for route in routes
+            for route_arr in route_arrays
         ]
     centroids: List[Point] = []
     for route in routes:
@@ -1771,25 +1926,29 @@ def compute_route_centroids(problem: HCVRPProblem, routes: Route_matrix) -> List
     return centroids
 
 
-def route_spread_value(problem: HCVRPProblem, route: Route) -> float:
+def route_spread_value(problem: HCVRPProblem, route: Route, route_arr=None) -> float:
     core = route_core(route)
     if not core:
         return 0.0
     if NUMBA_AVAILABLE and np is not None:
         depot_x, depot_y = problem.coords[0]
-        return float(_route_spread_numba(_route_to_numpy(route), problem.coords_np, depot_x, depot_y))
+        if route_arr is None:
+            route_arr = _route_to_numpy(route)
+        return float(_route_spread_numba(route_arr, problem.coords_np, depot_x, depot_y))
     cx, cy = compute_single_route_centroid(problem, route)
     return max(math.hypot(problem.coords[n][0] - cx, problem.coords[n][1] - cy) for n in core)
 
 
-def customer_outlier_score(problem: HCVRPProblem, route: Route, customer: int) -> float:
+def customer_outlier_score(problem: HCVRPProblem, route: Route, customer: int, route_arr=None) -> float:
     core = route_core(route)
     if customer not in core or len(core) <= 1:
         return 0.0
     if NUMBA_AVAILABLE and np is not None:
         depot_x, depot_y = problem.coords[0]
+        if route_arr is None:
+            route_arr = _route_to_numpy(route)
         return float(_customer_outlier_score_numba(
-            _route_to_numpy(route),
+            route_arr,
             customer,
             problem.coords_np,
             problem.dist_np,
@@ -1806,11 +1965,13 @@ def customer_outlier_score(problem: HCVRPProblem, route: Route, customer: int) -
     return radial + 0.45 * nearest - 55.0 * overlap
 
 
-def rank_route_outliers(problem: HCVRPProblem, route: Route, max_customers: int = 3) -> List[int]:
+def rank_route_outliers(problem: HCVRPProblem, route: Route, max_customers: int = 3, route_arr=None) -> List[int]:
     if NUMBA_AVAILABLE and np is not None:
         depot_x, depot_y = problem.coords[0]
+        if route_arr is None:
+            route_arr = _route_to_numpy(route)
         ranked = _rank_route_outliers_numba(
-            _route_to_numpy(route),
+            route_arr,
             problem.coords_np,
             problem.dist_np,
             problem.granular_neighbors_np,
@@ -1881,13 +2042,24 @@ def best_improving_inter_route_relocate(
         for pos_from, customer in enumerate(from_core):
             reduced_core = from_core[:pos_from] + from_core[pos_from+1:]
             insert_pos, _ = choose_best_insertion_position(problem, to_route, customer)
-            cr = clone_routes(state.routes)
-            cr[from_idx] = [0] + reduced_core + [0]
             to_core = route_core(to_route); to_core.insert(insert_pos - 1, customer)
-            cr[to_idx] = [0] + to_core + [0]
-            cr, cv = remove_empty_routes(cr, state.vehicle_ids[:])
-            cs = evaluate_solution(problem, cr, cv)
-            if cs.feasible and cs.total_cost < best_state.total_cost: best_state = cs
+            new_to_route = [0] + to_core + [0]
+            if reduced_core:
+                candidate = evaluate_fixed_vehicle_route_delta(
+                    problem, state,
+                    {
+                        from_idx: [0] + reduced_core + [0],
+                        to_idx: new_to_route,
+                    },
+                )
+            else:
+                cr = clone_routes(state.routes)
+                cr[from_idx] = [0] + reduced_core + [0]
+                cr[to_idx] = new_to_route
+                cr, cv = remove_empty_routes(cr, state.vehicle_ids[:])
+                candidate = evaluate_solution(problem, cr, cv)
+            if candidate is not None and candidate.feasible and candidate.total_cost < best_state.total_cost:
+                best_state = candidate
     if best_state.feasible and best_state.total_cost <= state.total_cost:
         return best_state
     return clone_solution_state(state)
@@ -1899,21 +2071,26 @@ def best_improving_outlier_relocate(
         max_outliers_per_route: int = 3
 ) -> "SolutionState":
     best_state = clone_solution_state(state)
+    route_centroids = compute_route_centroids(problem, state.routes)
+    route_arrays = _routes_to_numpy(state.routes) if (NUMBA_AVAILABLE and np is not None) else None
     source_scores = []
     for r_idx, route in enumerate(state.routes):
         core = route_core(route)
         if len(core) < 3:
             continue
-        source_scores.append((route_spread_value(problem, route), state.route_costs[r_idx], r_idx))
+        route_arr = route_arrays[r_idx] if route_arrays is not None else None
+        source_scores.append((route_spread_value(problem, route, route_arr=route_arr), state.route_costs[r_idx], r_idx))
     source_scores.sort(key=lambda x: (-x[0], -x[1], x[2]))
 
     for _, _, from_idx in source_scores[:max_source_routes]:
         from_route = state.routes[from_idx]
-        outliers = rank_route_outliers(problem, from_route, max_outliers_per_route)
+        from_route_arr = route_arrays[from_idx] if route_arrays is not None else None
+        outliers = rank_route_outliers(problem, from_route, max_outliers_per_route, route_arr=from_route_arr)
         for customer in outliers:
             candidate_targets = [
                 r_idx for r_idx in select_candidate_route_indices(
-                    problem, state.routes, customer, max_candidates=max_target_routes
+                    problem, state.routes, customer, max_candidates=max_target_routes,
+                    route_centroids=route_centroids, route_arrays=route_arrays
                 )
                 if r_idx != from_idx
             ]
@@ -1926,13 +2103,23 @@ def best_improving_outlier_relocate(
                 insert_pos, _ = choose_best_insertion_position(problem, to_route, customer)
                 to_core = route_core(to_route)
                 to_core.insert(insert_pos - 1, customer)
-                cr = clone_routes(state.routes)
-                cr[from_idx] = [0] + reduced_core + [0]
-                cr[to_idx] = [0] + to_core + [0]
-                cr, cv = remove_empty_routes(cr, state.vehicle_ids[:])
-                cs = evaluate_solution(problem, cr, cv)
-                if cs.feasible and cs.total_cost < best_state.total_cost:
-                    best_state = cs
+                new_to_route = [0] + to_core + [0]
+                if reduced_core:
+                    candidate = evaluate_fixed_vehicle_route_delta(
+                        problem, state,
+                        {
+                            from_idx: [0] + reduced_core + [0],
+                            to_idx: new_to_route,
+                        },
+                    )
+                else:
+                    cr = clone_routes(state.routes)
+                    cr[from_idx] = [0] + reduced_core + [0]
+                    cr[to_idx] = new_to_route
+                    cr, cv = remove_empty_routes(cr, state.vehicle_ids[:])
+                    candidate = evaluate_solution(problem, cr, cv)
+                if candidate is not None and candidate.feasible and candidate.total_cost < best_state.total_cost:
+                    best_state = candidate
     if best_state.feasible and best_state.total_cost <= state.total_cost:
         return best_state
     return clone_solution_state(state)
@@ -1944,26 +2131,32 @@ def best_improving_ejection_chain(
         max_outliers_per_route: int = 2, max_eject_per_target: int = 2
 ) -> "SolutionState":
     best_state = clone_solution_state(state)
+    route_centroids = compute_route_centroids(problem, state.routes)
+    route_arrays = _routes_to_numpy(state.routes) if (NUMBA_AVAILABLE and np is not None) else None
     source_scores = []
     for r_idx, route in enumerate(state.routes):
         core = route_core(route)
         if len(core) < 3:
             continue
-        source_scores.append((route_spread_value(problem, route), state.route_costs[r_idx], r_idx))
+        route_arr = route_arrays[r_idx] if route_arrays is not None else None
+        source_scores.append((route_spread_value(problem, route, route_arr=route_arr), state.route_costs[r_idx], r_idx))
     source_scores.sort(key=lambda x: (-x[0], -x[1], x[2]))
 
     for _, _, from_idx in source_scores[:max_source_routes]:
         from_route = state.routes[from_idx]
-        for customer in rank_route_outliers(problem, from_route, max_outliers_per_route):
+        from_route_arr = route_arrays[from_idx] if route_arrays is not None else None
+        for customer in rank_route_outliers(problem, from_route, max_outliers_per_route, route_arr=from_route_arr):
             target_indices = [
                 r_idx for r_idx in select_candidate_route_indices(
-                    problem, state.routes, customer, max_candidates=max_target_routes
+                    problem, state.routes, customer, max_candidates=max_target_routes,
+                    route_centroids=route_centroids, route_arrays=route_arrays
                 )
                 if r_idx != from_idx
             ]
             for to_idx in target_indices:
                 target_route = state.routes[to_idx]
-                eject_candidates = rank_route_outliers(problem, target_route, max_eject_per_target)
+                target_route_arr = route_arrays[to_idx] if route_arrays is not None else None
+                eject_candidates = rank_route_outliers(problem, target_route, max_eject_per_target, route_arr=target_route_arr)
                 for eject_customer in eject_candidates:
                     from_core = route_core(state.routes[from_idx])
                     to_core = route_core(state.routes[to_idx])
@@ -2013,15 +2206,18 @@ def best_improving_inter_route_swap(
             continue
         for i, c1 in enumerate(core1):
             for j, c2 in enumerate(core2):
-                cr = clone_routes(state.routes)
                 nr1 = core1[:]
                 nr2 = core2[:]
                 nr1[i], nr2[j] = c2, c1
-                cr[r1] = [0] + nr1 + [0]
-                cr[r2] = [0] + nr2 + [0]
-                cs = evaluate_solution(problem, cr, state.vehicle_ids)
-                if cs.feasible and cs.total_cost < best_state.total_cost:
-                    best_state = cs
+                candidate = evaluate_fixed_vehicle_route_delta(
+                    problem, state,
+                    {
+                        r1: [0] + nr1 + [0],
+                        r2: [0] + nr2 + [0],
+                    },
+                )
+                if candidate is not None and candidate.feasible and candidate.total_cost < best_state.total_cost:
+                    best_state = candidate
     return best_state
 
 
@@ -2036,16 +2232,19 @@ def best_improving_two_customer_relocate(
         for start in range(len(from_core) - 1):
             block = from_core[start:start + 2]
             reduced_core = from_core[:start] + from_core[start + 2:]
-            candidate_to = normalize_route(state.routes[to_idx])
+            candidate_to = _ensure_normalized(state.routes[to_idx])[:]
             for customer in block:
                 pos, _ = choose_best_insertion_position(problem, candidate_to, customer)
                 candidate_to.insert(pos, customer)
-            cr = clone_routes(state.routes)
-            cr[from_idx] = [0] + reduced_core + [0]
-            cr[to_idx] = candidate_to
-            cs = evaluate_solution(problem, cr, state.vehicle_ids)
-            if cs.feasible and cs.total_cost < best_state.total_cost:
-                best_state = cs
+            candidate = evaluate_fixed_vehicle_route_delta(
+                problem, state,
+                {
+                    from_idx: [0] + reduced_core + [0],
+                    to_idx: candidate_to,
+                },
+            )
+            if candidate is not None and candidate.feasible and candidate.total_cost < best_state.total_cost:
+                best_state = candidate
     return best_state
 
 
@@ -2059,11 +2258,15 @@ def best_improving_inter_route_2opt_star(
         if len(core1) < 2 or len(core2) < 2: continue
         for cut1 in evenly_spaced_positions(1, len(core1), max_cuts_per_route):
             for cut2 in evenly_spaced_positions(1, len(core2), max_cuts_per_route):
-                cr = clone_routes(state.routes)
-                cr[r1] = [0] + core1[:cut1] + core2[cut2:] + [0]
-                cr[r2] = [0] + core2[:cut2] + core1[cut1:] + [0]
-                cs = evaluate_solution(problem, cr, state.vehicle_ids)
-                if cs.feasible and cs.total_cost < best_state.total_cost: best_state = cs
+                candidate = evaluate_fixed_vehicle_route_delta(
+                    problem, state,
+                    {
+                        r1: [0] + core1[:cut1] + core2[cut2:] + [0],
+                        r2: [0] + core2[:cut2] + core1[cut1:] + [0],
+                    },
+                )
+                if candidate is not None and candidate.feasible and candidate.total_cost < best_state.total_cost:
+                    best_state = candidate
     return best_state
 
 
@@ -2083,11 +2286,15 @@ def best_improving_cross_exchange(
                     block1 = core1[start1:start1+len1]; rest1 = core1[:start1] + core1[start1+len1:]
                     for start2 in sp2:
                         block2 = core2[start2:start2+len2]; rest2 = core2[:start2] + core2[start2+len2:]
-                        cr = clone_routes(state.routes)
-                        cr[r1] = [0] + rest1[:start1] + block2 + rest1[start1:] + [0]
-                        cr[r2] = [0] + rest2[:start2] + block1 + rest2[start2:] + [0]
-                        cs = evaluate_solution(problem, cr, state.vehicle_ids)
-                        if cs.feasible and cs.total_cost < best_state.total_cost: best_state = cs
+                        candidate = evaluate_fixed_vehicle_route_delta(
+                            problem, state,
+                            {
+                                r1: [0] + rest1[:start1] + block2 + rest1[start1:] + [0],
+                                r2: [0] + rest2[:start2] + block1 + rest2[start2:] + [0],
+                            },
+                        )
+                        if candidate is not None and candidate.feasible and candidate.total_cost < best_state.total_cost:
+                            best_state = candidate
     return best_state
 
 
@@ -2177,16 +2384,10 @@ def intensify_local_search(
             (best_improving_intra_route_2opt,     {"max_routes":          int(limits["intra_routes"])}),
             (best_improving_or_opt,               {"max_routes":          int(limits["intra_routes"]),
                                                    "max_block_size":      3}),
-            (best_improving_double_bridge_move,   {"max_routes":          max(1, int(limits["intra_routes"]) // 2)}),
             (best_improving_outlier_relocate,     {"max_source_routes":   int(ALGO_CONFIG["outlier_source_routes"]),
                                                    "max_target_routes":   int(ALGO_CONFIG["outlier_target_routes"]),
                                                    "max_outliers_per_route": int(ALGO_CONFIG["outlier_customers_per_route"])}),
-            (best_improving_ejection_chain,       {"max_source_routes":   max(1, int(ALGO_CONFIG["outlier_source_routes"]) // 2),
-                                                   "max_target_routes":   int(ALGO_CONFIG["ejection_target_routes"]),
-                                                   "max_outliers_per_route": int(ALGO_CONFIG["outlier_customers_per_route"]),
-                                                   "max_eject_per_target": int(ALGO_CONFIG["ejection_candidates_per_route"])}),
             (best_improving_inter_route_relocate,  {"max_pairs":           int(limits["relocate_pairs"])}),
-            (best_improving_inter_route_swap,      {"max_pairs":           int(limits["relocate_pairs"])}),
             (best_improving_two_customer_relocate, {"max_pairs":           max(1, int(limits["relocate_pairs"]) // 2)}),
             (best_improving_inter_route_2opt_star, {"max_pairs":           int(limits["two_opt_pairs"]),
                                                     "max_cuts_per_route":  int(limits["max_cuts_per_route"])}),
@@ -2263,7 +2464,8 @@ def select_candidate_route_indices(
         routes: Route_matrix,
         customer: int,
         max_candidates: int = 8,
-        route_centroids: Optional[List[Point]] = None
+        route_centroids: Optional[List[Point]] = None,
+        route_arrays=None
 ) -> List[int]:
     if len(routes) <= max_candidates: return list(range(len(routes)))
     cx, cy = problem.coords[customer]
@@ -2271,6 +2473,8 @@ def select_candidate_route_indices(
     if route_centroids is None:
         route_centroids = compute_route_centroids(problem, routes)
     if NUMBA_AVAILABLE and np is not None:
+        if route_arrays is None:
+            route_arrays = _routes_to_numpy(routes)
         centroid_arr = np.asarray(route_centroids, dtype=np.float64)
         base = list(_select_candidate_route_indices_numba(
             cx, cy, centroid_arr[:, 0], centroid_arr[:, 1], min(len(routes), max_candidates * 2)
@@ -2282,7 +2486,7 @@ def select_candidate_route_indices(
         scored = []
         for r_idx in base:
             overlap = int(_count_granular_overlap_numba(
-                _route_to_numpy(routes[r_idx]),
+                route_arrays[r_idx],
                 problem.granular_neighbors_np[customer],
                 gcount,
             ))
@@ -2310,6 +2514,7 @@ def build_insertion_options_for_customer(
         current_route_loads: Optional[List[float]] = None,
         candidate_route_limit: int = 8,
         route_centroids: Optional[List[Point]] = None,
+        route_arrays=None,
         max_options: Optional[int] = None,
         allow_new_route: bool = True
 ) -> List[Tuple]:
@@ -2322,7 +2527,8 @@ def build_insertion_options_for_customer(
     for r_idx in select_candidate_route_indices(
             problem, routes, customer,
             max_candidates=candidate_route_limit,
-            route_centroids=route_centroids):
+            route_centroids=route_centroids,
+            route_arrays=route_arrays):
         if (current_route_loads is not None
                 and current_route_loads[r_idx] + customer_demand > problem.max_vehicle_capacity):
             continue
@@ -2347,7 +2553,7 @@ def build_insertion_options_for_customer(
             cx, cy = problem.coords[customer]
             rx, ry = route_centroids[r_idx]
             geo_penalty += centroid_weight * math.hypot(cx - rx, cy - ry)
-        if len(route_core(candidate_route)) >= 3:
+        if len(candidate_route) >= 5:
             geo_penalty += outlier_weight * customer_outlier_score(problem, candidate_route, customer)
         new_type = get_vehicle_type_by_id(problem, new_type_id)
         projected_load = (current_route_loads[r_idx] if current_route_loads is not None else problem.route_load(route)) + customer_demand
@@ -2383,7 +2589,8 @@ def choose_regret_customer_insertion(
         candidate_customer_limit: Optional[int] = None,
         candidate_route_limit: Optional[int] = None,
         allow_new_route: bool = True,
-        route_centroids: Optional[List[Point]] = None
+        route_centroids: Optional[List[Point]] = None,
+        route_arrays=None
 ) -> Optional[Tuple]:
     best_customer_choice = None
     if current_route_costs is None:
@@ -2394,6 +2601,8 @@ def choose_regret_customer_insertion(
             current_route_costs.append(rc if route_ok else None)
     if route_centroids is None:
         route_centroids = compute_route_centroids(problem, routes)
+    if route_arrays is None and NUMBA_AVAILABLE and np is not None:
+        route_arrays = _routes_to_numpy(routes)
     profile = get_problem_scale_profile(problem, active_route_count=max(1, len(routes)))
     if candidate_customer_limit is None: candidate_customer_limit = int(profile["regret_customer_limit"])
     if candidate_route_limit    is None: candidate_route_limit    = int(profile["regret_route_limit"])
@@ -2406,6 +2615,7 @@ def choose_regret_customer_insertion(
             current_route_loads=current_route_loads,
             candidate_route_limit=candidate_route_limit,
             route_centroids=route_centroids,
+            route_arrays=route_arrays,
             max_options=max(regret_k, 2),
             allow_new_route=allow_new_route
         )
@@ -2574,6 +2784,7 @@ def _apply_regret_insertion(
 ) -> bool:
     if route_centroids is None:
         route_centroids = compute_route_centroids(problem, routes)
+    route_arrays = _routes_to_numpy(routes) if (NUMBA_AVAILABLE and np is not None) else None
 
     current_route_costs: List[Optional[float]] = []
     current_route_loads: List[float] = []
@@ -2590,7 +2801,8 @@ def _apply_regret_insertion(
             current_route_costs=current_route_costs,
             current_route_loads=current_route_loads,
             allow_new_route=allow_new_route,
-            route_centroids=route_centroids
+            route_centroids=route_centroids,
+            route_arrays=route_arrays
         )
         if rc is None: return False
         customer, best_action, _, _ = rc
@@ -2598,11 +2810,13 @@ def _apply_regret_insertion(
 
         if action_type == "existing":
             old_type_id = vehicle_ids[r_idx]
-            nr = normalize_route(routes[r_idx]); nr.insert(pos, customer)
+            nr = _ensure_normalized(routes[r_idx])[:]; nr.insert(pos, customer)
             routes[r_idx] = nr; vehicle_ids[r_idx] = new_type_id
             current_route_costs[r_idx] = new_cost
             current_route_loads[r_idx] += problem.demands[customer]
             route_centroids[r_idx] = compute_single_route_centroid(problem, nr)
+            if route_arrays is not None:
+                route_arrays[r_idx] = _route_to_numpy(nr)
             if old_type_id != new_type_id:
                 type_usage[old_type_id] -= 1
                 if type_usage[old_type_id] <= 0: del type_usage[old_type_id]
@@ -2615,6 +2829,8 @@ def _apply_regret_insertion(
             current_route_costs.append(new_cost)
             current_route_loads.append(problem.demands[customer])
             route_centroids.append(compute_single_route_centroid(problem, new_route))
+            if route_arrays is not None:
+                route_arrays.append(_route_to_numpy(new_route))
 
         pending_customers.remove(customer)
     return True
@@ -3124,6 +3340,149 @@ def worst_route_shatter_phase(
     return clone_solution_state(state)
 
 
+def worst_route_micro_lns_phase(
+        problem: HCVRPProblem, state: "SolutionState",
+        neighbor_routes: int = 2, extra_routes: int = 1, attempts: int = 6
+) -> "SolutionState":
+    active = [i for i, route in enumerate(state.routes) if len(route_core(route)) >= 4]
+    if len(active) < 2:
+        return clone_solution_state(state)
+
+    centroids = compute_route_centroids(problem, state.routes)
+    target_idx = max(active, key=lambda r_idx: route_badness_score(problem, state, r_idx))
+    selected = [target_idx]
+    xi, yi = centroids[target_idx]
+    neighbors = []
+    target_set = set(route_core(state.routes[target_idx]))
+    for other in active:
+        if other == target_idx:
+            continue
+        xj, yj = centroids[other]
+        overlap = len(target_set & set(route_core(state.routes[other])))
+        neighbors.append((-(overlap), (xi - xj) ** 2 + (yi - yj) ** 2, other))
+    neighbors.sort(key=lambda x: (x[0], x[1], x[2]))
+    for _, _, other in neighbors[:neighbor_routes]:
+        selected.append(other)
+
+    pooled_customers: List[int] = []
+    kept_routes: Route_matrix = []
+    kept_vehicle_ids: List[int] = []
+    selected_set = set(selected)
+    for idx, (route, v_id) in enumerate(zip(state.routes, state.vehicle_ids)):
+        if idx in selected_set:
+            pooled_customers.extend(route_core(route))
+        else:
+            kept_routes.append(normalize_route(route))
+            kept_vehicle_ids.append(v_id)
+
+    if not pooled_customers:
+        return clone_solution_state(state)
+
+    best_candidate: Optional[SolutionState] = None
+    for target_route_count in (
+            max(1, len(selected)),
+            max(1, len(selected) + extra_routes),
+    ):
+        rebuilt = rebuild_customer_pool_into_routes(
+            problem,
+            pooled_customers,
+            target_route_count=target_route_count,
+            attempts=max(2, attempts),
+        )
+        if rebuilt is None:
+            continue
+        rebuilt_routes, rebuilt_vehicle_ids = rebuilt
+        candidate = evaluate_solution(problem, kept_routes + rebuilt_routes, kept_vehicle_ids + rebuilt_vehicle_ids)
+        if not candidate.feasible:
+            continue
+        if best_candidate is None or candidate.total_cost < best_candidate.total_cost:
+            best_candidate = candidate
+
+    if best_candidate is not None and cleanup_candidate_is_better(problem, state, best_candidate):
+        return best_candidate
+    return clone_solution_state(state)
+
+
+def full_moon_phase(
+        problem: HCVRPProblem, state: "SolutionState",
+        max_bad_routes: int = 2, neighbor_routes: int = 2,
+        max_routes_to_rebuild: int = 4, attempts: int = 5,
+        post_ls_rounds: int = 1
+) -> "SolutionState":
+    active = [i for i, route in enumerate(state.routes) if len(route_core(route)) >= 3]
+    if len(active) < 2:
+        return clone_solution_state(state)
+
+    centroids = compute_route_centroids(problem, state.routes)
+    ranked = sorted(
+        ((route_badness_score(problem, state, r_idx), r_idx) for r_idx in active),
+        key=lambda x: (-x[0], x[1])
+    )
+
+    selected: List[int] = []
+    for _, r_idx in ranked[:max_bad_routes]:
+        if r_idx not in selected:
+            selected.append(r_idx)
+
+    for r_idx in selected[:]:
+        if len(selected) >= max_routes_to_rebuild:
+            break
+        xi, yi = centroids[r_idx]
+        target_set = set(route_core(state.routes[r_idx]))
+        neighbors = []
+        for other in active:
+            if other == r_idx or other in selected:
+                continue
+            xj, yj = centroids[other]
+            overlap = len(target_set & set(route_core(state.routes[other])))
+            neighbors.append((-(overlap), (xi - xj) ** 2 + (yi - yj) ** 2, other))
+        neighbors.sort(key=lambda x: (x[0], x[1], x[2]))
+        for _, _, other in neighbors[:neighbor_routes]:
+            if other not in selected:
+                selected.append(other)
+            if len(selected) >= max_routes_to_rebuild:
+                break
+
+    selected = selected[:max_routes_to_rebuild]
+    if len(selected) < 2:
+        return clone_solution_state(state)
+
+    pooled_customers: List[int] = []
+    kept_routes: Route_matrix = []
+    kept_vehicle_ids: List[int] = []
+    selected_set = set(selected)
+    for idx, (route, v_id) in enumerate(zip(state.routes, state.vehicle_ids)):
+        if idx in selected_set:
+            pooled_customers.extend(route_core(route))
+        else:
+            kept_routes.append(_ensure_normalized(route))
+            kept_vehicle_ids.append(v_id)
+
+    if not pooled_customers:
+        return clone_solution_state(state)
+
+    rebuilt = rebuild_customer_pool_into_routes(
+        problem,
+        pooled_customers,
+        target_route_count=len(selected),
+        attempts=max(2, attempts),
+    )
+    if rebuilt is None:
+        return clone_solution_state(state)
+
+    rebuilt_routes, rebuilt_vehicle_ids = rebuilt
+    candidate = evaluate_solution(problem, kept_routes + rebuilt_routes, kept_vehicle_ids + rebuilt_vehicle_ids)
+    if not candidate.feasible:
+        return clone_solution_state(state)
+
+    if post_ls_rounds > 0:
+        candidate = intensify_local_search(problem, candidate, max_rounds=post_ls_rounds)
+
+    if candidate.feasible and candidate.total_cost < state.total_cost:
+        return candidate
+    return clone_solution_state(state)
+
+
 def targeted_cleanup_phase(problem: HCVRPProblem, state: "SolutionState") -> "SolutionState":
     if not state_has_route_pathology(problem, state):
         return clone_solution_state(state)
@@ -3132,6 +3491,16 @@ def targeted_cleanup_phase(problem: HCVRPProblem, state: "SolutionState") -> "So
     candidate = worst_route_outlier_purge_phase(problem, best_state, max_routes=1, outliers_per_route=2)
     if cleanup_candidate_is_better(problem, best_state, candidate):
         best_state = candidate
+
+    if state_has_route_pathology(problem, best_state):
+        candidate = worst_route_micro_lns_phase(
+            problem, best_state,
+            neighbor_routes=int(ALGO_CONFIG["micro_lns_neighbor_routes"]),
+            extra_routes=int(ALGO_CONFIG["micro_lns_extra_routes"]),
+            attempts=int(ALGO_CONFIG["micro_lns_attempts"]),
+        )
+        if cleanup_candidate_is_better(problem, best_state, candidate):
+            best_state = candidate
 
     if state_has_route_pathology(problem, best_state):
         candidate = worst_route_shatter_phase(
@@ -3467,6 +3836,8 @@ def run_bloodhound_hcvrp(
         print(f"Instance    : {getattr(problem, 'original_vrplib_name', '?')}")
         print(f"Nodes       : {problem.n_nodes}  |  Customers: {len(problem.customer_ids)}")
         print(f"Vehicle types: {n_types}  (toplam araç: {len(problem.vehicles)})")
+        print(f"Cost model  : {getattr(problem, 'cost_model_name', 'unknown')}")
+        print(f"Cost scale  : {getattr(problem, 'cost_scale_factor', 1.0)}")
         for vt in problem.vehicle_types:
             print(f"  Type {vt.type_id}: cap={vt.capacity}  cpm={vt.cost_per_km}  "
                   f"fc={vt.fixed_cost}  max={vt.max_count}")
@@ -3509,6 +3880,18 @@ def run_bloodhound_hcvrp(
             )
             if kick.feasible and kick.total_cost < hunt_best_cost:
                 hunt_best_state = kick; hunt_best_cost = kick.total_cost
+
+        full_moon = full_moon_phase(
+            problem, hunt_best_state,
+            max_bad_routes=int(ALGO_CONFIG["full_moon_bad_routes"]),
+            neighbor_routes=int(ALGO_CONFIG["full_moon_neighbor_routes"]),
+            max_routes_to_rebuild=int(ALGO_CONFIG["full_moon_max_routes"]),
+            attempts=int(ALGO_CONFIG["full_moon_attempts"]),
+            post_ls_rounds=int(ALGO_CONFIG["full_moon_post_ls_rounds"]),
+        )
+        if full_moon.feasible and full_moon.total_cost < hunt_best_cost:
+            hunt_best_state = full_moon
+            hunt_best_cost = full_moon.total_cost
 
         if hunt_best_cost < global_best.total_cost:
             prev_global_best_cost = global_best.total_cost
@@ -3556,7 +3939,7 @@ if __name__ == "__main__":
 
     SEARCH_PARAMS = {
         "num_wolves":         10,
-        "num_hunts":          15,
+        "num_hunts":          5,
         "explore_iterations": 100,
         "reserve_blood":      2.5,
         "lambda_reg":         1,
@@ -3576,7 +3959,7 @@ if __name__ == "__main__":
     }
 
     DATASET_DIR  = Path(__file__).resolve().parent / "Test_data"
-    DATASET_FILE = DATASET_DIR / "X200-HD.txt"
+    DATASET_FILE = DATASET_DIR / "X256-FSMF.txt"
 
     if (not DATASET_FILE.exists()) or DATASET_FILE.stat().st_size == 0:
         fallback_files = sorted(

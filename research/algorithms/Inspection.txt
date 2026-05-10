@@ -527,3 +527,74 @@ Route #37: 199 184 8 166 24 66 198
 Route #38: 102 75 170 69 165 139 80
 Route #39: 152 131 103 132 191 159
 Cost: 60119.25           
+
+
+Veri dosyasi: X200-HD.txt
+Instance    : X200-HD
+Nodes       : 200  |  Customers: 199
+Vehicle types: 9  (toplam araç: 39)
+  Type 0: cap=277.0  cpm=1.0  fc=77.0  max=5
+  Type 1: cap=302.0  cpm=1.0  fc=82.0  max=5
+  Type 2: cap=330.0  cpm=1.0  fc=88.0  max=5
+  Type 3: cap=360.0  cpm=1.0  fc=94.0  max=4
+  Type 4: cap=392.0  cpm=1.0  fc=100.0  max=4
+  Type 5: cap=428.0  cpm=1.0  fc=170.0  max=4
+  Type 6: cap=466.0  cpm=1.0  fc=113.0  max=4
+  Type 7: cap=509.0  cpm=1.0  fc=121.0  max=4
+  Type 8: cap=555.0  cpm=1.0  fc=129.0  max=4
+SO cap_pw=300.0  relax_period=25  enforce_period=25
+Initial best cost: 80318.0
+Initial routes   : 38
+Hunt 1/5 | alpha=7 | hunt_best=66150.0000 | global_best=66150.0000 | hunt_routes=37 | best_routes=37 | pop_min=66150.0000 | pop_mean=71787.8000 | pop_max=114598.0000 | stagnation=0 | closed_regions=1 | elite_pool=6 | bandit={'shaw': 1.0, 'worst': 0.4087, 'targeted': 0.2, 'route': 50.743} | so_relax=2 so_enforce=3
+Hunt 2/5 | alpha=3 | hunt_best=65837.0000 | global_best=65837.0000 | hunt_routes=37 | best_routes=37 | pop_min=65837.0000 | pop_mean=71228.5000 | pop_max=114473.0000 | stagnation=0 | closed_regions=2 | elite_pool=6 | bandit={'shaw': 1.15, 'worst': 0.4087, 'targeted': 9.0475, 'route': 50.743} | so_relax=4 so_enforce=6
+Hunt 3/5 | alpha=4 | hunt_best=65198.0000 | global_best=65198.0000 | hunt_routes=37 | best_routes=37 | pop_min=65198.0000 | pop_mean=65828.7000 | pop_max=67465.0000 | stagnation=0 | closed_regions=3 | elite_pool=6 | bandit={'shaw': 1.15, 'worst': 0.4087, 'targeted': 0.3043, 'route': 53.8592} | so_relax=6 so_enforce=9
+Hunt 4/5 | alpha=8 | hunt_best=64431.0000 | global_best=64431.0000 | hunt_routes=37 | best_routes=37 | pop_min=64431.0000 | pop_mean=65601.0000 | pop_max=66595.0000 | stagnation=0 | closed_regions=4 | elite_pool=6 | bandit={'shaw': 1.15, 'worst': 0.4087, 'targeted': 0.2, 'route': 26.0071} | so_relax=8 so_enforce=12
+Hunt 5/5 | alpha=4 | hunt_best=64431.0000 | global_best=64431.0000 | hunt_routes=37 | best_routes=37 | pop_min=64431.0000 | pop_mean=65566.3000 | pop_max=66771.0000 | stagnation=1 | closed_regions=5 | elite_pool=6 | bandit={'shaw': 0.835, 'worst': 0.3161, 'targeted': 0.2, 'route': 26.0071} | so_relax=10 so_enforce=15
+
+===== FINAL BEST =====
+Instance   : X200-HD
+Feasible   : True
+Hard Feas. : True
+Route count: 37
+Total cost : 64431.0
+Type usage : {'type0(cap=277.0)': 4, 'type1(cap=302.0)': 5, 'type2(cap=330.0)': 5, 'type3(cap=360.0)': 3, 'type4(cap=392.0)': 4, 'type5(cap=428.0)': 4, 'type6(cap=466.0)': 4, 'type7(cap=509.0)': 4, 'type8(cap=555.0)': 4}
+Route loads: [298.0, 550.0, 389.0, 505.0, 547.0, 424.0, 465.0, 311.0, 454.0, 505.0, 356.0, 357.0, 514.0, 506.0, 385.0, 503.0, 426.0, 302.0, 354.0, 259.0, 392.0, 386.0, 522.0, 248.0, 329.0, 264.0, 315.0, 296.0, 288.0, 265.0, 321.0, 298.0, 322.0, 387.0, 424.0, 389.0, 407.0]
+Route dist : [1638.0, 1819.0, 1200.0, 1990.0, 1723.0, 2007.0, 1560.0, 1031.0, 1778.0, 1444.0, 1393.0, 1005.0, 1549.0, 1762.0, 1639.0, 1867.0, 1578.0, 910.0, 1112.0, 1565.0, 1857.0, 1958.0, 1874.0, 1206.0, 1477.0, 1686.0, 1845.0, 1814.0, 1424.0, 1498.0, 1741.0, 1724.0, 1668.0, 1653.0, 2027.0, 2001.0, 2436.0]
+Route costs: [1720.0, 1948.0, 1300.0, 2111.0, 1852.0, 2120.0, 1673.0, 1119.0, 1891.0, 1565.0, 1487.0, 1099.0, 1678.0, 1883.0, 1739.0, 1988.0, 1748.0, 992.0, 1206.0, 1642.0, 1957.0, 2128.0, 2003.0, 1283.0, 1565.0, 1763.0, 1933.0, 1896.0, 1506.0, 1575.0, 1829.0, 1806.0, 1756.0, 1823.0, 2140.0, 2101.0, 2606.0]
+  Route  0 [type1]: [1, 24, 175, 113, 10, 1]
+  Route  1 [type8]: [1, 200, 185, 57, 38, 177, 167, 199, 1]
+  Route  2 [type4]: [1, 69, 68, 63, 152, 73, 1]
+  Route  3 [type7]: [1, 127, 3, 139, 182, 101, 169, 17, 1]
+  Route  4 [type8]: [1, 98, 148, 131, 196, 55, 116, 157, 1]
+  Route  5 [type6]: [1, 26, 115, 44, 147, 123, 144, 1]
+  Route  6 [type6]: [1, 80, 163, 12, 180, 186, 179, 1]
+  Route  7 [type2]: [1, 93, 27, 56, 18, 15, 146, 168, 187, 1]
+  Route  8 [type6]: [1, 197, 173, 50, 62, 103, 120, 170, 1]
+  Route  9 [type7]: [1, 46, 64, 29, 85, 59, 13, 1]
+  Route 10 [type3]: [1, 75, 6, 49, 114, 33, 1]
+  Route 11 [type3]: [1, 19, 79, 155, 122, 126, 41, 1]
+  Route 12 [type8]: [1, 78, 71, 189, 164, 47, 58, 195, 1]
+  Route 13 [type7]: [1, 4, 94, 129, 14, 9, 42, 36, 1]
+  Route 14 [type4]: [1, 136, 156, 117, 96, 52, 1]
+  Route 15 [type7]: [1, 105, 25, 154, 174, 184, 51, 106, 1]
+  Route 16 [type5]: [1, 181, 95, 121, 74, 99, 84, 1]
+  Route 17 [type1]: [1, 151, 130, 110, 5, 77, 1]
+  Route 18 [type3]: [1, 28, 86, 89, 107, 66, 143, 1]
+  Route 19 [type0]: [1, 112, 191, 159, 137, 1]
+  Route 20 [type4]: [1, 97, 198, 138, 142, 48, 1]
+  Route 21 [type5]: [1, 108, 193, 149, 176, 128, 1]
+  Route 22 [type8]: [1, 102, 83, 153, 133, 192, 160, 1]
+  Route 23 [type0]: [1, 32, 21, 11, 1]
+  Route 24 [type2]: [1, 162, 72, 16, 34, 92, 1]
+  Route 25 [type0]: [1, 165, 22, 65, 1]
+  Route 26 [type2]: [1, 100, 158, 134, 82, 1]
+  Route 27 [type1]: [1, 125, 37, 61, 1]
+  Route 28 [type1]: [1, 60, 30, 119, 1]
+  Route 29 [type0]: [1, 178, 35, 190, 23, 1]
+  Route 30 [type2]: [1, 171, 70, 166, 109, 1]
+  Route 31 [type1]: [1, 172, 118, 7, 76, 1]
+  Route 32 [type2]: [1, 81, 87, 140, 111, 1]
+  Route 33 [type5]: [1, 45, 2, 91, 161, 145, 1]
+  Route 34 [type6]: [1, 141, 8, 39, 90, 104, 43, 1]
+  Route 35 [type4]: [1, 132, 20, 31, 150, 67, 1]
+  Route 36 [type5]: [1, 54, 124, 183, 40, 194, 88, 135, 188, 53, 1]
