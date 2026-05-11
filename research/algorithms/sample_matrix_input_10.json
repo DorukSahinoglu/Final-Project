@@ -1,0 +1,56 @@
+{
+  "name": "sample-10-customers",
+  "addresses": [
+    { "id": 0, "label": "Depo", "address": "Merkez Depo", "isDepot": true, "lat": 0, "lon": 0, "demand": 0 },
+    { "id": 1, "label": "Müşteri 1", "address": "Adres 1", "isDepot": false, "lat": 2, "lon": 8, "demand": 40 },
+    { "id": 2, "label": "Müşteri 2", "address": "Adres 2", "isDepot": false, "lat": 4, "lon": 6, "demand": 35 },
+    { "id": 3, "label": "Müşteri 3", "address": "Adres 3", "isDepot": false, "lat": 7, "lon": 7, "demand": 50 },
+    { "id": 4, "label": "Müşteri 4", "address": "Adres 4", "isDepot": false, "lat": 8, "lon": 3, "demand": 30 },
+    { "id": 5, "label": "Müşteri 5", "address": "Adres 5", "isDepot": false, "lat": 6, "lon": 1, "demand": 45 },
+    { "id": 6, "label": "Müşteri 6", "address": "Adres 6", "isDepot": false, "lat": 1, "lon": 4, "demand": 20 },
+    { "id": 7, "label": "Müşteri 7", "address": "Adres 7", "isDepot": false, "lat": 3, "lon": 1, "demand": 25 },
+    { "id": 8, "label": "Müşteri 8", "address": "Adres 8", "isDepot": false, "lat": 9, "lon": 8, "demand": 55 },
+    { "id": 9, "label": "Müşteri 9", "address": "Adres 9", "isDepot": false, "lat": 10, "lon": 5, "demand": 60 },
+    { "id": 10, "label": "Müşteri 10", "address": "Adres 10", "isDepot": false, "lat": 5, "lon": 9, "demand": 40 }
+  ],
+  "demands": [0, 40, 35, 50, 30, 45, 20, 25, 55, 60, 40],
+  "vehicles": [
+    { "id": 0, "name": "Kamyon", "type": "Kamyon", "capacity": 180, "cost_per_km": 1.0, "fixed_cost": 120.0, "speed": 1.0, "count": 2, "color": "#00f5ff" },
+    { "id": 1, "name": "Van", "type": "Van", "capacity": 120, "cost_per_km": 1.2, "fixed_cost": 80.0, "speed": 1.0, "count": 2, "color": "#00ff41" }
+  ],
+  "distance_matrix": [
+    [0, 8, 7, 10, 9, 6, 4, 3, 12, 11, 10],
+    [8, 0, 3, 5, 8, 8, 4, 7, 7, 9, 3],
+    [7, 3, 0, 3, 5, 5, 4, 5, 5, 6, 3],
+    [10, 5, 3, 0, 4, 6, 7, 7, 2, 4, 3],
+    [9, 8, 5, 4, 0, 3, 7, 5, 5, 3, 7],
+    [6, 8, 5, 6, 3, 0, 6, 3, 8, 6, 8],
+    [4, 4, 4, 7, 7, 6, 0, 4, 9, 9, 6],
+    [3, 7, 5, 7, 5, 3, 4, 0, 9, 8, 8],
+    [12, 7, 5, 2, 5, 8, 9, 9, 0, 3, 4],
+    [11, 9, 6, 4, 3, 6, 9, 8, 3, 0, 6],
+    [10, 3, 3, 3, 7, 8, 6, 8, 4, 6, 0]
+  ],
+  "time_matrix": [
+    [0, 8, 7, 10, 9, 6, 4, 3, 12, 11, 10],
+    [8, 0, 3, 5, 8, 8, 4, 7, 7, 9, 3],
+    [7, 3, 0, 3, 5, 5, 4, 5, 5, 6, 3],
+    [10, 5, 3, 0, 4, 6, 7, 7, 2, 4, 3],
+    [9, 8, 5, 4, 0, 3, 7, 5, 5, 3, 7],
+    [6, 8, 5, 6, 3, 0, 6, 3, 8, 6, 8],
+    [4, 4, 4, 7, 7, 6, 0, 4, 9, 9, 6],
+    [3, 7, 5, 7, 5, 3, 4, 0, 9, 8, 8],
+    [12, 7, 5, 2, 5, 8, 9, 9, 0, 3, 4],
+    [11, 9, 6, 4, 3, 6, 9, 8, 3, 0, 6],
+    [10, 3, 3, 3, 7, 8, 6, 8, 4, 6, 0]
+  ],
+  "solver_params": {
+    "num_wolves": 6,
+    "num_hunts": 3,
+    "explore_iterations": 30,
+    "wolf_parallel_workers": 2,
+    "verbose": false,
+    "random_seed": 666
+  },
+  "trace_every": 10
+}
