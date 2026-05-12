@@ -1825,28 +1825,20 @@ class OutputTraceCollector:
         history = self._wolf_iterations.setdefault(int(wolf_id), [])
         entry = {
             "iter": len(history) + 1,
-            "wolf_id": int(wolf_id),
-            "hunt": int(hunt),
-            "stage": stage,
             "cost": round(float(state.total_cost), 4),
             "routes": self._routes_payload(problem, state),
         }
-        if explore_iter is not None:
-            entry["explore_iter"] = int(explore_iter)
         history.append(entry)
 
-    def export(self) -> Dict:
-        return {
-            "addresses": self.addresses,
-            "vehicles": self.vehicles,
-            "wolves": [
-                {
-                    "wolf_id": wolf_id,
-                    "iterations": iterations,
-                }
-                for wolf_id, iterations in sorted(self._wolf_iterations.items())
-            ],
-        }
+    def export_per_wolf(self) -> Dict[int, Dict]:
+        payloads: Dict[int, Dict] = {}
+        for wolf_id, iterations in sorted(self._wolf_iterations.items()):
+            payloads[int(wolf_id)] = {
+                "addresses": self.addresses,
+                "vehicles": self.vehicles,
+                "iterations": iterations,
+            }
+        return payloads
 
 def route_count(state: "SolutionState") -> int:
     return len(state.routes)
@@ -4317,8 +4309,8 @@ if __name__ == "__main__":
     problem, addresses, vehicles = build_matrix_backed_problem(payload)
 
     solver_params = {
-        "num_wolves": 8,
-        "num_hunts": 5,
+        "num_wolves": 2,
+        "num_hunts": 1,
         "explore_iterations": 100,
         "reserve_blood": 2.5,
         "lambda_reg": 1,
@@ -4349,18 +4341,18 @@ if __name__ == "__main__":
         **solver_params,
     )
 
-    output_payload = collector.export()
-    output_payload["final_best"] = {
-        "feasible": bool(best_state.feasible),
-        "hard_feasible": bool(best_state.hard_feasible),
-        "route_count": int(route_count(best_state)),
-        "total_cost": round(float(best_state.total_cost), 4),
-    }
+    output_payloads = collector.export_per_wolf()
+    output_suffix = output_path.suffix if output_path.suffix else ".json"
+    written_files: List[Path] = []
+    for wolf_id, output_payload in output_payloads.items():
+        wolf_output_path = output_path.with_name(f"{output_path.stem}_wolf_{wolf_id}{output_suffix}")
+        wolf_output_path.write_text(
+            json.dumps(output_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        written_files.append(wolf_output_path)
 
-    output_path.write_text(
-        json.dumps(output_payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     print(f"Input : {input_path}")
-    print(f"Output: {output_path}")
+    for wolf_output_path in written_files:
+        print(f"Output: {wolf_output_path}")
     print(f"Final cost: {round(float(best_state.total_cost), 4)}")
