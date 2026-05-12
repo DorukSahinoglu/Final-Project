@@ -1,0 +1,683 @@
+import { useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  AlertTriangle,
+  FileUp,
+  LoaderCircle,
+  MapPinned,
+  Plus,
+  Save,
+  ScanSearch,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
+import { api } from "@/lib/api";
+import { detectFleetType, findDuplicateValues, projectValidation } from "@/lib/vrp";
+import { sampleProject } from "@/data/sample-project";
+import type { AddressInput, FleetUnitInput, MatrixResponse, ProjectRecord, SolutionResponse } from "@/types/api";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Progress } from "@/components/ui/progress";
+
+type ProjectWorkflowProps = {
+  project: ProjectRecord | null;
+  setProject: (project: ProjectRecord) => void;
+  matrix: MatrixResponse | null;
+  setMatrix: (matrix: MatrixResponse | null) => void;
+  setCurrentJobId: (jobId: string | null) => void;
+  setCurrentSolution: (solution: SolutionResponse | null) => void;
+  onToast: (title: string, body: string) => void;
+};
+
+type DraftAddress = AddressInput & {
+  id?: string;
+  geocode_status?: string;
+  geocode_provider?: string | null;
+};
+
+type DraftFleet = FleetUnitInput & {
+  id?: string;
+};
+
+const emptyAddress = (index: number): DraftAddress => ({
+  label: `Customer ${index + 1}`,
+  address_line: "",
+  demand: 1,
+  is_depot: false,
+  latitude: null,
+  longitude: null,
+  service_time_min: 0,
+  time_window_start_min: null,
+  time_window_end_min: null,
+  notes: "",
+  geocode_status: "pending",
+});
+
+const emptyFleet = (index: number): DraftFleet => ({
+  vehicle_type_id: `vehicle-${index + 1}`,
+  label: index === 0 ? "Standard Van" : `Vehicle ${index + 1}`,
+  count: 1,
+  capacity: 10,
+  fixed_cost: 45,
+  cost_per_km: 8,
+  speed_kmh: 35,
+  max_route_distance_km: null,
+  max_route_time_min: null,
+});
+
+export function ProjectWorkflow({
+  project,
+  setProject,
+  matrix,
+  setMatrix,
+  setCurrentJobId,
+  setCurrentSolution,
+  onToast,
+}: ProjectWorkflowProps) {
+  const csvInputRef = useRef<HTMLInputElement | null>(null);
+  const [name, setName] = useState(sampleProject.name);
+  const [description, setDescription] = useState(sampleProject.description ?? "");
+  const [addresses, setAddresses] = useState<DraftAddress[]>(sampleProject.addresses);
+  const [fleet, setFleet] = useState<DraftFleet[]>(sampleProject.fleet_units);
+  const [loadingState, setLoadingState] = useState<"" | "project" | "geocode" | "matrix">("");
+  const [error, setError] = useState<string | null>(null);
+  const [matrixProgress, setMatrixProgress] = useState(0);
+
+  useEffect(() => {
+    if (!project) return;
+    setName(project.name);
+    setDescription(project.description ?? "");
+    setAddresses(project.addresses);
+    setFleet(project.fleet_units);
+  }, [project]);
+
+  const fleetType = useMemo(() => detectFleetType(fleet), [fleet]);
+  const duplicateLabels = useMemo(() => findDuplicateValues(addresses.map((item) => item.label)), [addresses]);
+  const duplicateAddresses = useMemo(() => findDuplicateValues(addresses.map((item) => item.address_line)), [addresses]);
+  const geocodedCount = useMemo(
+    () => addresses.filter((item) => item.latitude != null && item.longitude != null).length,
+    [addresses],
+  );
+
+  const draftProject = useMemo<ProjectRecord>(() => {
+    return {
+      id: project?.id ?? "draft-project",
+      name,
+      description,
+      status: project?.status ?? "draft",
+      settings: project?.settings ?? {},
+      addresses: addresses.map((item, index) => ({
+        ...item,
+        id: item.id ?? `draft-address-${index}`,
+        geocode_status: item.geocode_status ?? (item.latitude != null && item.longitude != null ? "ready" : "pending"),
+        geocode_provider: item.geocode_provider ?? null,
+      })),
+      fleet_units: fleet.map((item, index) => ({
+        ...item,
+        id: item.id ?? `draft-fleet-${index}`,
+      })),
+    };
+  }, [addresses, description, fleet, name, project]);
+
+  const validation = useMemo(() => projectValidation(draftProject, matrix), [draftProject, matrix]);
+  const hasExistingProject = Boolean(project?.id);
+
+  const persistProject = async () => {
+    try {
+      setLoadingState("project");
+      setError(null);
+      const payload = {
+        name,
+        description,
+        settings: {
+          fleet_type: fleetType,
+          updated_via: "desktop-workflow",
+        },
+        addresses,
+        fleet_units: fleet,
+      };
+      const saved = hasExistingProject ? await api.updateProject(project!.id, payload) : await api.createProject(payload);
+      setProject(saved);
+      setMatrix(null);
+      setCurrentJobId(null);
+      setCurrentSolution(null);
+      onToast(hasExistingProject ? "Project updated" : "Project created", "Address book and fleet state were saved to the backend.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Project save failed.");
+    } finally {
+      setLoadingState("");
+    }
+  };
+
+  const geocodeAddresses = async () => {
+    if (!project?.id) return;
+    try {
+      setLoadingState("geocode");
+      setError(null);
+      const pendingIds = addresses.filter((item) => item.latitude == null || item.longitude == null).map((item) => item.id!).filter(Boolean);
+      await api.geocodeProject(project.id, pendingIds);
+      const refreshed = await api.getProject(project.id);
+      setProject(refreshed);
+      setAddresses(refreshed.addresses);
+      onToast("Geocoding complete", `${refreshed.addresses.filter((item) => item.geocode_status === "ready").length} addresses now have coordinates.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Geocoding failed.");
+    } finally {
+      setLoadingState("");
+    }
+  };
+
+  const generateMatrix = async () => {
+    if (!project?.id) return;
+    let timer: number | undefined;
+    try {
+      setLoadingState("matrix");
+      setError(null);
+      setMatrixProgress(8);
+      timer = window.setInterval(() => {
+        setMatrixProgress((value) => (value >= 88 ? value : value + 7));
+      }, 180);
+      const baselineSpeed = fleet[0]?.speed_kmh ?? 35;
+      const nextMatrix = await api.generateMatrix(project.id, baselineSpeed);
+      setMatrixProgress(100);
+      setMatrix(nextMatrix);
+      onToast("Matrix generated", `${nextMatrix.provider} matrix is ready for solver execution.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Matrix generation failed.");
+    } finally {
+      if (timer) window.clearInterval(timer);
+      window.setTimeout(() => setMatrixProgress(0), 500);
+      setLoadingState("");
+    }
+  };
+
+  const loadSample = () => {
+    setName(sampleProject.name);
+    setDescription(sampleProject.description ?? "");
+    setAddresses(sampleProject.addresses);
+    setFleet(sampleProject.fleet_units);
+    setError(null);
+    onToast("Sample loaded", "A demo-ready Istanbul scenario was loaded into the workspace.");
+  };
+
+  const onCsvPicked = async (file: File | null) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      // TODO: upgrade parser to robust quoted CSV handling if customers include commas in free text.
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      if (lines.length < 2) throw new Error("CSV must include a header row and at least one address row.");
+      const headers = lines[0].split(",").map((item) => item.trim().toLowerCase());
+      const rows = lines.slice(1).map((line) => line.split(","));
+      const imported = rows.map((cells, index) => {
+        const read = (key: string) => {
+          const cellIndex = headers.indexOf(key);
+          return cellIndex >= 0 ? cells[cellIndex]?.trim() ?? "" : "";
+        };
+        return {
+          ...emptyAddress(addresses.length + index),
+          label: read("label") || read("name") || `Customer ${addresses.length + index + 1}`,
+          address_line: read("address") || read("address_line"),
+          demand: Number(read("demand") || 1),
+          latitude: read("latitude") ? Number(read("latitude")) : null,
+          longitude: read("longitude") ? Number(read("longitude")) : null,
+          service_time_min: Number(read("service_time_min") || 0),
+          notes: read("notes"),
+          is_depot: /^(1|true|yes)$/i.test(read("is_depot")),
+          geocode_status: read("latitude") && read("longitude") ? "ready" : "pending",
+        } satisfies DraftAddress;
+      });
+      setAddresses((items) => [...items, ...imported]);
+      onToast("CSV imported", `${imported.length} addresses were added to the project draft.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "CSV import failed.");
+    }
+  };
+
+  const canSave = validation.errors.length === 0 && loadingState === "";
+  const canGeocode = Boolean(project?.id) && loadingState === "" && addresses.some((item) => item.latitude == null || item.longitude == null);
+  const canGenerateMatrix =
+    Boolean(project?.id) &&
+    loadingState === "" &&
+    addresses.length > 1 &&
+    addresses.every((item) => item.latitude != null && item.longitude != null);
+
+  return (
+    <div className="space-y-5">
+      <Card className="p-6">
+        <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+          <div className="max-w-2xl">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-accent/20 bg-accent/10 text-accent">
+                <Sparkles size={18} />
+              </div>
+              <div>
+                <div className="text-lg font-semibold text-white">Usable optimization workflow</div>
+                <div className="mt-1 text-sm text-slate-400">
+                  Save real fleets and addresses, geocode them, generate a backend matrix, then move directly into solver review.
+                </div>
+              </div>
+            </div>
+            <Progress value={validation.completeness} className="mt-5" />
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <Badge className="border-accent/20 bg-accent/10 text-accent">{fleetType}</Badge>
+            <Badge className="border-white/10 bg-white/[0.04] text-slate-300">{validation.completeness}% complete</Badge>
+            <Button variant="secondary" className="gap-2" onClick={loadSample}>
+              <Sparkles size={15} />
+              Load sample
+            </Button>
+            <Button onClick={persistProject} disabled={!canSave} className="gap-2">
+              {loadingState === "project" ? <LoaderCircle size={16} className="animate-spin" /> : <Save size={16} />}
+              {hasExistingProject ? "Update project" : "Create project"}
+            </Button>
+          </div>
+        </div>
+
+        {(error || validation.errors.length > 0 || validation.warnings.length > 0) && (
+          <div className="mt-5 grid gap-3 lg:grid-cols-2">
+            <ValidationList title="Errors" tone="danger" items={error ? [error, ...validation.errors] : validation.errors} />
+            <ValidationList title="Warnings" tone="warning" items={validation.warnings} />
+          </div>
+        )}
+      </Card>
+
+      <div className="grid gap-5 xl:grid-cols-[1.1fr_0.9fr]">
+        <Card className="p-6">
+          <SectionHeader
+            title="Project profile"
+            subtitle="Name, description, depot policy and backend persistence state."
+            badge={project ? "Saved" : "Draft"}
+          />
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
+            <Field label="Project name">
+              <Input value={name} onChange={(event) => setName(event.target.value)} />
+            </Field>
+            <Field label="Fleet mode">
+              <div className="flex h-11 items-center rounded-2xl border border-white/10 bg-white/[0.03] px-4 text-sm text-slate-200">
+                {fleetType === "homogeneous" ? "Homogeneous fleet detected" : "Heterogeneous fleet detected"}
+              </div>
+            </Field>
+          </div>
+          <Field label="Description" className="mt-4">
+            <textarea
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              className="min-h-[110px] w-full rounded-[22px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-accent/30"
+            />
+          </Field>
+
+          <div className="mt-5 grid gap-4 sm:grid-cols-3">
+            <Metric title="Addresses" value={String(addresses.length)} detail={`${geocodedCount}/${addresses.length} geocoded`} />
+            <Metric title="Fleet units" value={String(fleet.reduce((sum, item) => sum + item.count, 0))} detail={`${fleet.length} vehicle profiles`} />
+            <Metric title="Matrix" value={matrix ? "Ready" : "Pending"} detail={matrix ? `${matrix.provider} ${matrix.size}x${matrix.size}` : "Generate after geocoding"} />
+          </div>
+        </Card>
+
+        <Card className="p-6">
+          <SectionHeader title="Backend actions" subtitle="Use real API actions only. No fake execution states remain." badge="Live" />
+          <div className="mt-5 space-y-4">
+            <ActionRow
+              title="Geocode addresses"
+              description="Uses Google API key when configured, otherwise falls back to Nominatim."
+              action={
+                <Button onClick={geocodeAddresses} disabled={!canGeocode} variant="secondary" className="gap-2">
+                  {loadingState === "geocode" ? <LoaderCircle size={16} className="animate-spin" /> : <MapPinned size={16} />}
+                  Geocode addresses
+                </Button>
+              }
+            />
+            <ActionRow
+              title="Generate distance/time matrix"
+              description="Creates a real backend matrix snapshot used by both Bloodhound and NSGA-II."
+              action={
+                <Button onClick={generateMatrix} disabled={!canGenerateMatrix} variant="secondary" className="gap-2">
+                  {loadingState === "matrix" ? <LoaderCircle size={16} className="animate-spin" /> : <ScanSearch size={16} />}
+                  Generate matrix
+                </Button>
+              }
+            />
+            <AnimatePresence>
+              {loadingState === "matrix" && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  className="rounded-[24px] border border-accent/20 bg-accent/10 p-4"
+                >
+                  <div className="flex items-center justify-between text-sm text-slate-200">
+                    <span>Matrix generation progress</span>
+                    <span>{matrixProgress}%</span>
+                  </div>
+                  <Progress value={matrixProgress} className="mt-3" />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </Card>
+      </div>
+
+      <Card className="p-6">
+        <SectionHeader
+          title="Address management"
+          subtitle="Manual editing, CSV import, depot selection, demand validation, per-address geocoding state."
+          badge={`${addresses.length} rows`}
+        />
+
+        <div className="mt-5 flex flex-wrap gap-3">
+          <Button variant="secondary" className="gap-2" onClick={() => setAddresses((items) => [...items, emptyAddress(items.length)])}>
+            <Plus size={15} />
+            Add address
+          </Button>
+          <Button variant="secondary" className="gap-2" onClick={() => csvInputRef.current?.click()}>
+            <FileUp size={15} />
+            Import CSV
+          </Button>
+          <input
+            ref={csvInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            onChange={(event) => void onCsvPicked(event.target.files?.[0] ?? null)}
+          />
+        </div>
+
+        <div className="mt-5 overflow-x-auto rounded-[28px] border border-white/10">
+          <table className="min-w-full divide-y divide-white/10 text-sm">
+            <thead className="bg-white/[0.03] text-slate-400">
+              <tr>
+                {["Depot", "Label", "Address", "Demand", "Lat", "Lon", "Service", "Status", "Notes", ""].map((heading) => (
+                  <th key={heading} className="px-3 py-3 text-left font-medium">
+                    {heading}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/10 bg-[#09101c]/60">
+              {addresses.map((address, index) => (
+                <tr key={address.id ?? `address-${index}`} className="align-top">
+                  <td className="px-3 py-3">
+                    <button
+                      className={`rounded-full px-3 py-1 text-xs transition ${
+                        address.is_depot ? "bg-accent/15 text-accent" : "bg-white/[0.05] text-slate-400"
+                      }`}
+                      onClick={() =>
+                        setAddresses((items) => items.map((item, itemIndex) => ({ ...item, is_depot: itemIndex === index })))
+                      }
+                    >
+                      {address.is_depot ? "Depot" : "Set"}
+                    </button>
+                  </td>
+                  <td className="px-3 py-3">
+                    <Input
+                      value={address.label}
+                      onChange={(event) => updateAddress(index, { label: event.target.value }, setAddresses)}
+                    />
+                  </td>
+                  <td className="min-w-[260px] px-3 py-3">
+                    <Input
+                      value={address.address_line}
+                      onChange={(event) => updateAddress(index, { address_line: event.target.value }, setAddresses)}
+                    />
+                  </td>
+                  <td className="w-[100px] px-3 py-3">
+                    <Input
+                      type="number"
+                      value={address.demand}
+                      disabled={address.is_depot}
+                      onChange={(event) => updateAddress(index, { demand: Number(event.target.value) }, setAddresses)}
+                    />
+                  </td>
+                  <td className="w-[120px] px-3 py-3">
+                    <Input
+                      type="number"
+                      value={address.latitude ?? ""}
+                      onChange={(event) => updateAddress(index, { latitude: parseOptionalNumber(event.target.value) }, setAddresses)}
+                    />
+                  </td>
+                  <td className="w-[120px] px-3 py-3">
+                    <Input
+                      type="number"
+                      value={address.longitude ?? ""}
+                      onChange={(event) => updateAddress(index, { longitude: parseOptionalNumber(event.target.value) }, setAddresses)}
+                    />
+                  </td>
+                  <td className="w-[100px] px-3 py-3">
+                    <Input
+                      type="number"
+                      value={address.service_time_min ?? 0}
+                      onChange={(event) => updateAddress(index, { service_time_min: Number(event.target.value) }, setAddresses)}
+                    />
+                  </td>
+                  <td className="px-3 py-3">
+                    <Badge className={statusClass(address.geocode_status ?? "pending")}>{address.geocode_status ?? "pending"}</Badge>
+                  </td>
+                  <td className="min-w-[220px] px-3 py-3">
+                    <textarea
+                      value={address.notes ?? ""}
+                      onChange={(event) => updateAddress(index, { notes: event.target.value }, setAddresses)}
+                      className="min-h-[64px] w-full rounded-[18px] border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-accent/30"
+                    />
+                  </td>
+                  <td className="px-3 py-3">
+                    <Button variant="ghost" className="px-3 py-2" onClick={() => setAddresses((items) => items.filter((_, itemIndex) => itemIndex !== index))}>
+                      <Trash2 size={16} />
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {(duplicateLabels.length > 0 || duplicateAddresses.length > 0) && (
+          <div className="mt-4 flex flex-wrap gap-3">
+            {duplicateLabels.length > 0 && <InlineWarning text={`Duplicate labels: ${duplicateLabels.join(", ")}`} />}
+            {duplicateAddresses.length > 0 && <InlineWarning text={`Duplicate addresses: ${duplicateAddresses.join(", ")}`} />}
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-6">
+        <SectionHeader
+          title="Fleet management"
+          subtitle="Create homogeneous or heterogeneous fleets. Bloodhound uses this exactly as saved."
+          badge={`${fleet.reduce((sum, item) => sum + item.count, 0)} vehicles`}
+        />
+
+        <div className="mt-5 flex flex-wrap gap-3">
+          <Button variant="secondary" className="gap-2" onClick={() => setFleet((items) => [...items, emptyFleet(items.length)])}>
+            <Plus size={15} />
+            Add vehicle type
+          </Button>
+          <Badge className={fleetType === "homogeneous" ? "border-success/20 bg-success/10 text-success" : "border-warning/20 bg-warning/10 text-warning"}>
+            {fleetType === "homogeneous" ? "NSGA-II available" : "NSGA-II locked"}
+          </Badge>
+        </div>
+
+        <div className="mt-5 grid gap-4">
+          {fleet.map((unit, index) => (
+            <div key={unit.id ?? `fleet-${index}`} className="rounded-[26px] border border-white/10 bg-white/[0.03] p-4">
+              <div className="grid gap-4 lg:grid-cols-7">
+                <Field label="Vehicle type">
+                  <Input value={unit.vehicle_type_id} onChange={(event) => updateFleet(index, { vehicle_type_id: event.target.value }, setFleet)} />
+                </Field>
+                <Field label="Label">
+                  <Input value={unit.label} onChange={(event) => updateFleet(index, { label: event.target.value }, setFleet)} />
+                </Field>
+                <Field label="Count">
+                  <Input type="number" value={unit.count} onChange={(event) => updateFleet(index, { count: Number(event.target.value) }, setFleet)} />
+                </Field>
+                <Field label="Capacity">
+                  <Input type="number" value={unit.capacity} onChange={(event) => updateFleet(index, { capacity: Number(event.target.value) }, setFleet)} />
+                </Field>
+                <Field label="Fixed cost">
+                  <Input type="number" value={unit.fixed_cost} onChange={(event) => updateFleet(index, { fixed_cost: Number(event.target.value) }, setFleet)} />
+                </Field>
+                <Field label="Variable cost">
+                  <Input type="number" value={unit.cost_per_km} onChange={(event) => updateFleet(index, { cost_per_km: Number(event.target.value) }, setFleet)} />
+                </Field>
+                <Field label="Speed km/h">
+                  <Input type="number" value={unit.speed_kmh} onChange={(event) => updateFleet(index, { speed_kmh: Number(event.target.value) }, setFleet)} />
+                </Field>
+              </div>
+              <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_1fr_auto]">
+                <Field label="Max route distance km">
+                  <Input
+                    type="number"
+                    value={unit.max_route_distance_km ?? ""}
+                    onChange={(event) => updateFleet(index, { max_route_distance_km: parseOptionalNumber(event.target.value) }, setFleet)}
+                  />
+                </Field>
+                <Field label="Max route time min">
+                  <Input
+                    type="number"
+                    value={unit.max_route_time_min ?? ""}
+                    onChange={(event) => updateFleet(index, { max_route_time_min: parseOptionalNumber(event.target.value) }, setFleet)}
+                  />
+                </Field>
+                <div className="flex items-end">
+                  <Button variant="ghost" className="gap-2" onClick={() => setFleet((items) => items.filter((_, itemIndex) => itemIndex !== index))}>
+                    <Trash2 size={16} />
+                    Remove
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function SectionHeader({ title, subtitle, badge }: { title: string; subtitle: string; badge: string }) {
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div className="min-w-0 flex-1">
+        <div className="text-lg font-semibold text-white">{title}</div>
+        <div className="mt-1 break-words text-sm text-slate-400">{subtitle}</div>
+      </div>
+      <Badge className="max-w-full border-white/10 bg-white/[0.04] text-slate-300">{badge}</Badge>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  children,
+  className = "",
+}: {
+  label: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={className}>
+      <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">{label}</div>
+      {children}
+    </div>
+  );
+}
+
+function Metric({ title, value, detail }: { title: string; value: string; detail: string }) {
+  return (
+    <div className="min-w-0 rounded-[24px] border border-white/10 bg-white/[0.03] p-4">
+      <div className="break-words text-xs uppercase tracking-[0.18em] text-slate-500">{title}</div>
+      <div className="mt-2 break-words text-xl font-semibold leading-tight text-white">{value}</div>
+      <div className="mt-2 break-words text-sm text-slate-400">{detail}</div>
+    </div>
+  );
+}
+
+function ValidationList({
+  title,
+  tone,
+  items,
+}: {
+  title: string;
+  tone: "danger" | "warning";
+  items: string[];
+}) {
+  if (items.length === 0) return null;
+  const styles =
+    tone === "danger"
+      ? "border-danger/30 bg-danger/10 text-danger"
+      : "border-warning/30 bg-warning/10 text-warning";
+  return (
+    <div className={`rounded-[24px] border p-4 ${styles}`}>
+      <div className="flex items-center gap-2 text-sm font-medium">
+        <AlertTriangle size={16} />
+        {title}
+      </div>
+      <div className="mt-3 space-y-2 text-sm">
+        {items.map((item) => (
+          <div key={item} className="break-words">{item}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ActionRow({
+  title,
+  description,
+  action,
+}: {
+  title: string;
+  description: string;
+  action: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="text-sm font-medium text-white">{title}</div>
+          <div className="mt-1 break-words text-sm text-slate-400">{description}</div>
+        </div>
+        {action}
+      </div>
+    </div>
+  );
+}
+
+function InlineWarning({ text }: { text: string }) {
+  return (
+    <div className="rounded-full border border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning">
+      {text}
+    </div>
+  );
+}
+
+function statusClass(status: string) {
+  if (status === "ready") return "border-success/20 bg-success/10 text-success";
+  if (status === "failed") return "border-danger/20 bg-danger/10 text-danger";
+  return "border-white/10 bg-white/[0.04] text-slate-300";
+}
+
+function parseOptionalNumber(value: string) {
+  if (!value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function updateAddress(index: number, patch: Partial<DraftAddress>, setAddresses: Dispatch<SetStateAction<DraftAddress[]>>) {
+  setAddresses((items) =>
+    items.map((item, itemIndex) => {
+      if (itemIndex !== index) return item;
+      const merged = { ...item, ...patch };
+      if (merged.latitude != null && merged.longitude != null) {
+        merged.geocode_status = "ready";
+      } else if (merged.address_line.trim()) {
+        merged.geocode_status = "pending";
+      }
+      return merged;
+    }),
+  );
+}
+
+function updateFleet(index: number, patch: Partial<DraftFleet>, setFleet: Dispatch<SetStateAction<DraftFleet[]>>) {
+  setFleet((items) => items.map((item, itemIndex) => (itemIndex === index ? { ...item, ...patch } : item)));
+}

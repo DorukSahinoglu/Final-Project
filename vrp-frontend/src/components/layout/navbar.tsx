@@ -1,4 +1,4 @@
-import { Activity, Command, Search, Sparkles } from "lucide-react";
+import { Command, Search, Settings2, Sparkles } from "lucide-react";
 import { motion } from "framer-motion";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -7,9 +7,11 @@ import { Badge } from "@/components/ui/badge";
 export function Navbar({
   onCommandOpen,
   healthLabel,
+  onSettingsOpen,
 }: {
   onCommandOpen: () => void;
   healthLabel: string;
+  onSettingsOpen: () => void;
 }) {
   return (
     <motion.div
@@ -43,8 +45,11 @@ export function Navbar({
           <Sparkles size={16} />
           Coming soon
         </Button>
-        <button className="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-white">
-          <Activity size={18} />
+        <button
+          onClick={onSettingsOpen}
+          className="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-white"
+        >
+          <Settings2 size={18} />
         </button>
       </div>
     </motion.div>

@@ -1,16 +1,16 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Download, FolderOpen, Menu, PanelRightClose, PanelRightOpen, Save, WandSparkles } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { browserFileSystemAdapter } from "@/lib/filesystem";
 import { pathToView, viewPathMap } from "@/lib/routes";
-import type { AppView } from "@/data/navigation";
 import type { HealthResponse, JobResponse, MatrixResponse, ProjectRecord, SolutionResponse } from "@/types/api";
 import type { WorkspaceSnapshot } from "@/types/workspace";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { FloatingMonitor } from "@/components/layout/floating-monitor";
 import { InspectorPanel } from "@/components/layout/inspector-panel";
 import { Navbar } from "@/components/layout/navbar";
+import { SettingsModal } from "@/components/layout/settings-modal";
 import { Sidebar } from "@/components/layout/sidebar";
 import { SplitLayout } from "@/components/layout/split-layout";
 import { WorkspaceTabs } from "@/components/layout/workspace-tabs";
@@ -73,6 +73,7 @@ export function DesktopShell(props: ShellProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const activeView = useMemo(() => pathToView(location.pathname), [location.pathname]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const currentFocus = {
     workflow: "Desktop workflow workspace with local save/load and persistent inspector",
@@ -149,6 +150,7 @@ export function DesktopShell(props: ShellProps) {
           <Navbar
             onCommandOpen={() => setPaletteOpen(true)}
             healthLabel={health ? `${health.app} ${health.status}` : "Backend not connected"}
+            onSettingsOpen={() => setSettingsOpen(true)}
           />
 
           <WorkspaceTabs active={activeView} onChange={(view) => navigate(viewPathMap[view])} />
@@ -207,6 +209,7 @@ export function DesktopShell(props: ShellProps) {
       )}
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onSelect={(view) => navigate(viewPathMap[view])} />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onToast={pushToast} />
       <FloatingMonitor job={currentJob} open={monitorOpen} onClose={() => setMonitorOpen(false)} />
       <ToastStack toasts={toasts} />
     </div>
