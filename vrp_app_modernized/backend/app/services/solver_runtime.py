@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -11,7 +12,6 @@ from vrp_app_final.schemas import (
     CustomerDemand,
     FleetUnit,
     LocationRecord,
-    ServiceTime,
     SolverConfig,
     SolverKey,
     TimeWindow,
@@ -103,10 +103,6 @@ class SolverRuntimeService:
             )
             for index, item in enumerate(ordered_addresses)
         ]
-        service_times = [
-            ServiceTime(node_id=index, duration_min=item.service_time_min)
-            for index, item in enumerate(ordered_addresses)
-        ]
         fleet_source = list(project.fleet_units)
         if solver_key == "nsga2" and fleet_source:
             representative = fleet_source[0]
@@ -151,7 +147,6 @@ class SolverRuntimeService:
             demands=demands,
             fleet=fleet,
             time_windows=time_windows,
-            service_times=service_times,
             solver_config=solver_config,
         )
 
@@ -173,7 +168,7 @@ class SolverRuntimeService:
 
             route_payloads.append(
                 {
-                    **route.__dict__,
+                    **asdict(route),
                     "nodes": sequence_indices,
                     "address_ids": address_ids,
                     "stop_labels": stop_labels,

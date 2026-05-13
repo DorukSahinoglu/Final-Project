@@ -12,16 +12,15 @@ class AddressBase(BaseModel):
     is_depot: bool = False
     latitude: float | None = None
     longitude: float | None = None
-    service_time_min: float = 0.0
     time_window_start_min: float | None = None
     time_window_end_min: float | None = None
     notes: str | None = None
 
-    @field_validator("demand", "service_time_min")
+    @field_validator("demand")
     @classmethod
     def non_negative_numbers(cls, value: float) -> float:
         if value < 0:
-            raise ValueError("Demand and service time must be non-negative.")
+            raise ValueError("Demand must be non-negative.")
         return value
 
 
@@ -93,6 +92,7 @@ class ProjectRead(BaseModel):
     settings: dict
     addresses: list[AddressRead]
     fleet_units: list[FleetUnitRead]
+    updated_at: datetime
 
 
 class ProjectSummary(BaseModel):
@@ -102,6 +102,7 @@ class ProjectSummary(BaseModel):
     name: str
     description: str | None
     status: str
+    updated_at: datetime
 
 
 class ProjectSolutionSummary(BaseModel):

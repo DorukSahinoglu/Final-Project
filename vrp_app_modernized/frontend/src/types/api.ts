@@ -5,19 +5,20 @@ export type HealthResponse = {
 };
 
 export type AddressInput = {
+  id?: string;
   label: string;
   address_line: string;
   demand: number;
   is_depot: boolean;
   latitude?: number | null;
   longitude?: number | null;
-  service_time_min?: number;
   time_window_start_min?: number | null;
   time_window_end_min?: number | null;
   notes?: string | null;
 };
 
 export type FleetUnitInput = {
+  id?: string;
   vehicle_type_id: string;
   label: string;
   count: number;
@@ -55,6 +56,15 @@ export type ProjectRecord = {
   settings: Record<string, unknown>;
   addresses: AddressRecord[];
   fleet_units: FleetUnitRecord[];
+  updated_at: string;
+};
+
+export type ProjectSummary = {
+  id: string;
+  name: string;
+  description?: string | null;
+  status: string;
+  updated_at: string;
 };
 
 export type GeocodeResponse = {
@@ -88,6 +98,15 @@ export type MatrixResponse = {
   metadata: Record<string, unknown>;
   distance_matrix: number[][];
   time_matrix: number[][];
+};
+
+export type MatrixLoadJsonPayload = {
+  project_id: string;
+  distance_matrix: number[][];
+  time_matrix?: number[][];
+  node_ids?: string[];
+  address_ids?: string[];
+  metadata?: Record<string, unknown>;
 };
 
 export type JobAcceptedResponse = {
@@ -156,4 +175,22 @@ export type GoogleSettingsResponse = {
   google_api_key?: string | null;
   geocode_provider: string;
   matrix_provider: string;
+};
+
+export type ProjectBundle = {
+  exported_at: string;
+  version: number;
+  project: ProjectRecord;
+  matrix: MatrixResponse | null;
+  solutions: SolutionResponse[];
+  jobs: JobResponse[];
+};
+
+export type ProjectSavePayload = {
+  project_id?: string | null;
+  project: ProjectCreatePayload;
+  matrix?: MatrixResponse | null;
+  solutions?: SolutionResponse[];
+  jobs?: JobResponse[];
+  include_google_api_key?: boolean;
 };

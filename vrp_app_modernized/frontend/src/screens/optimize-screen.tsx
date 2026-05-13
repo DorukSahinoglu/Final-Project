@@ -3,6 +3,7 @@ import { OptimizationConsole } from "@/components/dashboard/optimization-console
 
 type Props = {
   project: ProjectRecord | null;
+  setProject: (project: ProjectRecord) => void;
   matrix: MatrixResponse | null;
   currentJobId: string | null;
   setCurrentJobId: (jobId: string | null) => void;

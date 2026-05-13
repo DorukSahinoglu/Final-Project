@@ -14,12 +14,12 @@ class SettingsService:
 
     def get_google_settings(self) -> GoogleSettingsRead:
         key = self._get_value(self.GOOGLE_API_KEY)
-        provider = "google" if key else "nominatim"
-        matrix_provider = "google_distance_matrix" if key else "haversine"
+        provider = "google" if key else "unconfigured"
+        matrix_provider = "osrm"
         return GoogleSettingsRead(google_api_key=key, geocode_provider=provider, matrix_provider=matrix_provider)
 
     def update_google_settings(self, payload: GoogleSettingsUpdate) -> GoogleSettingsRead:
-        self._set_value(self.GOOGLE_API_KEY, payload.google_api_key or "")
+        self._set_value(self.GOOGLE_API_KEY, (payload.google_api_key or "").strip())
         self.db.commit()
         return self.get_google_settings()
 
@@ -34,7 +34,7 @@ class SettingsService:
     def _set_value(self, key: str, value: str) -> None:
         item = self.db.get(models.AppSetting, key)
         if item is None:
-          item = models.AppSetting(key=key, value=value)
-          self.db.add(item)
+            item = models.AppSetting(key=key, value=value)
+            self.db.add(item)
         else:
-          item.value = value
+            item.value = value

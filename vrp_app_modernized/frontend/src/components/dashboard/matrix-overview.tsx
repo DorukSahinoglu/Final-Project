@@ -18,6 +18,8 @@ export function MatrixOverview({ project, matrix }: { project: ProjectRecord | n
   const previewDistance = matrix?.distance_matrix.slice(0, 6).map((row) => row.slice(0, 6)) ?? [];
   const previewTime = matrix?.time_matrix.slice(0, 6).map((row) => row.slice(0, 6)) ?? [];
   const geocodedCount = project.addresses.filter((item) => item.latitude != null && item.longitude != null).length;
+  const matrixSourceLabel = getMatrixSourceLabel(matrix);
+  const matrixSourceDetail = getMatrixSourceDetail(matrix);
 
   return (
     <div className="space-y-5">
@@ -37,8 +39,17 @@ export function MatrixOverview({ project, matrix }: { project: ProjectRecord | n
             <Metric title="Project" value={project.name} detail={project.description ?? "No description"} />
             <Metric title="Depot" value={depot?.label ?? "Missing"} detail={depot?.address_line ?? "Select a depot in workflow"} />
             <Metric title="Coordinate coverage" value={`${geocodedCount}/${project.addresses.length}`} detail="Addresses with usable latitude/longitude" />
-            <Metric title="Provider" value={matrix?.provider ?? "Waiting"} detail={matrix ? `Snapshot ${matrix.id.slice(0, 8)}` : "Generate a backend snapshot"} />
+            <Metric title="Matrix source" value={matrixSourceLabel} detail={matrix ? matrixSourceDetail : "Generate or import a backend matrix snapshot"} />
           </div>
+
+          {matrix && (
+            <div className="mt-5 rounded-[24px] border border-accent/20 bg-accent/10 p-4">
+              <div className="text-sm font-medium text-white">Active matrix source</div>
+              <div className="mt-2 break-words text-sm text-slate-300">
+                {matrixSourceLabel}. {matrixSourceDetail}
+              </div>
+            </div>
+          )}
 
           <div className="mt-5 rounded-[24px] border border-white/10 bg-white/[0.03] p-4">
             <div className="text-sm font-medium text-white">Address geocoding status</div>
@@ -78,17 +89,38 @@ export function MatrixOverview({ project, matrix }: { project: ProjectRecord | n
       <div className="grid gap-5 xl:grid-cols-2">
         <Card className="p-6">
           <div className="text-lg font-semibold text-white">Distance matrix preview</div>
-          <div className="mt-1 text-sm text-slate-400">Top-left snapshot section for quick inspection and debugging.</div>
+          <div className="mt-1 text-sm text-slate-400">Top-left snapshot section for quick inspection and debugging. Generated snapshots use OSRM, while imported snapshots come from local JSON.</div>
           <MatrixGrid values={previewDistance} emptyMessage="Generate a matrix to inspect distance values." suffix="km" />
         </Card>
         <Card className="p-6">
           <div className="text-lg font-semibold text-white">Time matrix preview</div>
-          <div className="mt-1 text-sm text-slate-400">Top-left time table using the exact backend snapshot used by the solvers.</div>
+          <div className="mt-1 text-sm text-slate-400">Top-left time table using the exact backend snapshot used by the solvers. If JSON time values are omitted, distance values are reused.</div>
           <MatrixGrid values={previewTime} emptyMessage="Generate a matrix to inspect travel-time values." suffix="min" />
         </Card>
       </div>
     </div>
   );
+}
+
+function getMatrixSourceLabel(matrix: MatrixResponse | null) {
+  if (!matrix) return "Waiting";
+  if (matrix.provider === "osrm") return "OSRM generated";
+  if (matrix.provider === "json_import") return "JSON imported";
+  return matrix.provider;
+}
+
+function getMatrixSourceDetail(matrix: MatrixResponse | null) {
+  if (!matrix) return "";
+  const source = String(matrix.metadata?.source ?? matrix.provider);
+  const snapshot = `Snapshot ${matrix.id.slice(0, 8)}`;
+  if (matrix.provider === "osrm") {
+    return `${snapshot}. Built from OSRM road-network distance and duration tables.`;
+  }
+  if (matrix.provider === "json_import") {
+    const reused = matrix.metadata?.time_matrix_defaulted_from_distance ? " Time matrix reused distance values." : "";
+    return `${snapshot}. Imported from editable JSON (${source}).${reused}`;
+  }
+  return `${snapshot}. Source: ${source}.`;
 }
 
 function Metric({ title, value, detail }: { title: string; value: string; detail: string }) {

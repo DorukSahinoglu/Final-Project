@@ -12,7 +12,6 @@ export const sampleProject: ProjectCreatePayload = {
       address_line: "Maslak Mahallesi, Sariyer, Istanbul, Turkiye",
       demand: 0,
       is_depot: true,
-      service_time_min: 0,
       notes: "Primary dispatch depot",
     },
     {
@@ -20,7 +19,6 @@ export const sampleProject: ProjectCreatePayload = {
       address_line: "Halaskargazi Cd. 198, Sisli, Istanbul, Turkiye",
       demand: 4,
       is_depot: false,
-      service_time_min: 12,
       notes: "Timed retail delivery",
     },
     {
@@ -28,7 +26,6 @@ export const sampleProject: ProjectCreatePayload = {
       address_line: "Bagdat Cd. 312, Kadikoy, Istanbul, Turkiye",
       demand: 6,
       is_depot: false,
-      service_time_min: 15,
       notes: "High-priority customer",
     },
     {
@@ -36,14 +33,12 @@ export const sampleProject: ProjectCreatePayload = {
       address_line: "Fisekhane Cd. 12, Bakirkoy, Istanbul, Turkiye",
       demand: 3,
       is_depot: false,
-      service_time_min: 8,
     },
     {
       label: "Besiktas Office",
       address_line: "Barbaros Blv. 74, Besiktas, Istanbul, Turkiye",
       demand: 2,
       is_depot: false,
-      service_time_min: 5,
     },
   ],
   fleet_units: [

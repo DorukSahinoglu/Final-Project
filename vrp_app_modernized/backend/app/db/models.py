@@ -81,7 +81,7 @@ class MatrixSnapshot(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     status: Mapped[str] = mapped_column(String(32), default="ready")
-    provider: Mapped[str] = mapped_column(String(64), default="haversine")
+    provider: Mapped[str] = mapped_column(String(64), default="osrm")
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     distance_matrix_json: Mapped[str] = mapped_column(Text, default="[]")
     time_matrix_json: Mapped[str] = mapped_column(Text, default="[]")

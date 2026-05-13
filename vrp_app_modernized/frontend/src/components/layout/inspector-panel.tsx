@@ -12,6 +12,13 @@ export function InspectorPanel({
   matrix: MatrixResponse | null;
   currentSolution: SolutionResponse | null;
 }) {
+  const matrixSourceLabel = matrix
+    ? matrix.provider === "osrm"
+      ? "OSRM generated"
+      : matrix.provider === "json_import"
+        ? "JSON imported"
+        : matrix.provider
+    : null;
   return (
     <Card className="h-full rounded-[30px] p-5">
       <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
@@ -35,7 +42,15 @@ export function InspectorPanel({
         <InspectorBlock
           icon={Database}
           title="Matrix"
-          lines={matrix ? [`${matrix.size} x ${matrix.size}`, `Provider: ${matrix.provider}`, `Status: ${matrix.status}`] : ["No matrix generated yet"]}
+          lines={
+            matrix
+              ? [
+                  `${matrix.size} x ${matrix.size}`,
+                  `Source: ${matrixSourceLabel}`,
+                  `Status: ${matrix.status}`,
+                ]
+              : ["No matrix generated yet"]
+          }
         />
         <InspectorBlock
           icon={Route}

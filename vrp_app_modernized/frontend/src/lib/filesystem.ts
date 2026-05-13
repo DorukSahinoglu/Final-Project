@@ -1,8 +1,11 @@
+import type { ProjectBundle } from "@/types/api";
 import type { WorkspaceSnapshot } from "@/types/workspace";
 
 export type FileSystemAdapter = {
   saveWorkspace(snapshot: WorkspaceSnapshot): Promise<void>;
   loadWorkspace(): Promise<WorkspaceSnapshot | null>;
+  exportProjectBundle(filename: string, bundle: ProjectBundle): Promise<void>;
+  importProjectBundle(): Promise<ProjectBundle | null>;
 };
 
 function downloadJson(filename: string, data: unknown) {
@@ -37,5 +40,14 @@ export const browserFileSystemAdapter: FileSystemAdapter = {
     if (!file) return null;
     const text = await file.text();
     return JSON.parse(text) as WorkspaceSnapshot;
+  },
+  async exportProjectBundle(filename, bundle) {
+    downloadJson(filename, bundle);
+  },
+  async importProjectBundle() {
+    const file = await promptJsonFile();
+    if (!file) return null;
+    const text = await file.text();
+    return JSON.parse(text) as ProjectBundle;
   },
 };

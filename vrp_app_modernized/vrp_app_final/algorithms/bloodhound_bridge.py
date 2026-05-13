@@ -17,7 +17,7 @@ def _resolve_root_dir() -> Path:
 
 
 ROOT_DIR = _resolve_root_dir()
-BLOODHOUND_SOURCE = ROOT_DIR / "research" / "algorithms" / "Bloodhound_Optimizer_VRP"
+BLOODHOUND_SOURCE = ROOT_DIR / "research" / "algorithms" / "bloodhoundtest3_for_app.py"
 
 _LEGACY_BLOODHOUND = None
 HUNT_LINE_RE = re.compile(
@@ -207,8 +207,18 @@ def run_bloodhound_with_matrices(
     }
     if solver_params:
         params.update(solver_params)
+    # Accept a few legacy alias names from older UI layers without breaking execution.
+    alias_map = {
+        "max_hunts": "num_hunts",
+        "pack_size": "num_wolves",
+    }
+    for alias, canonical in alias_map.items():
+        if alias in params and canonical not in params:
+            params[canonical] = params.pop(alias)
+        else:
+            params.pop(alias, None)
     max_route_time_min = params.pop("max_route_time_min", None)
-    problem = MatrixBackedHCVRPProblem(
+    problem = legacy.HCVRPProblem(
         coords=coords,
         demands=demands,
         vehicles=vehicles,

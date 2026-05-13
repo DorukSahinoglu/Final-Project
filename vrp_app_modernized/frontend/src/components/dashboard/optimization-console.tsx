@@ -1,17 +1,24 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Ban, LoaderCircle, Lock, Play, RefreshCcw } from "lucide-react";
+import { Ban, LoaderCircle, Lock, Play, RefreshCcw, Settings2 } from "lucide-react";
 import { api } from "@/lib/api";
+import {
+  mergeAlgorithmParameters,
+  solverLabel,
+  validateAlgorithmParameters,
+  type AlgorithmParameterState,
+} from "@/lib/algorithm-parameters";
 import { detectFleetType, getDepot, projectValidation } from "@/lib/vrp";
 import { useJobPolling } from "@/hooks/use-job-polling";
 import type { JobResponse, MatrixResponse, ProjectRecord, SolutionResponse } from "@/types/api";
+import { AlgorithmParametersModal } from "@/components/dashboard/algorithm-parameters-modal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 
 type Props = {
   project: ProjectRecord | null;
+  setProject: (project: ProjectRecord) => void;
   matrix: MatrixResponse | null;
   currentJobId: string | null;
   setCurrentJobId: (jobId: string | null) => void;
@@ -24,6 +31,7 @@ const routePalette = ["#57e6ff", "#91f7c4", "#f7cf7e", "#f48fb1", "#a5b4fc", "#f
 
 export function OptimizationConsole({
   project,
+  setProject,
   matrix,
   currentJobId,
   setCurrentJobId,
@@ -32,24 +40,37 @@ export function OptimizationConsole({
   onToast,
 }: Props) {
   const [solver, setSolver] = useState<"nsga2" | "bloodhound">("bloodhound");
-  const [population, setPopulation] = useState(60);
-  const [generations, setGenerations] = useState(120);
-  const [hunts, setHunts] = useState(20);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedRoute, setExpandedRoute] = useState<number | null>(0);
+  const [parametersOpen, setParametersOpen] = useState(false);
   const { job, error: jobError } = useJobPolling(currentJobId);
 
   const fleetType = useMemo(() => detectFleetType(project?.fleet_units ?? []), [project?.fleet_units]);
   const validation = useMemo(() => projectValidation(project, matrix), [project, matrix]);
   const depot = useMemo(() => getDepot(project), [project]);
   const solverLocked = solver === "nsga2" && fleetType === "heterogeneous";
+  const algorithmParameters = useMemo(() => mergeAlgorithmParameters(project?.settings), [project?.settings]);
+  const parameterErrors = useMemo(() => validateAlgorithmParameters(algorithmParameters), [algorithmParameters]);
+  const matrixSourceLabel = matrix ? (matrix.provider === "osrm" ? "OSRM generated" : matrix.provider === "json_import" ? "JSON imported" : matrix.provider) : "Missing";
 
   useEffect(() => {
     if (fleetType === "heterogeneous" && solver === "nsga2") {
       setSolver("bloodhound");
     }
   }, [fleetType, solver]);
+
+  useEffect(() => {
+    if (!project) return;
+    if (project.settings.selected_solver === solver) return;
+    setProject({
+      ...project,
+      settings: {
+        ...project.settings,
+        selected_solver: solver,
+      },
+    });
+  }, [project, setProject, solver]);
 
   useEffect(() => {
     if (!job?.solution_id) return;
@@ -89,13 +110,55 @@ export function OptimizationConsole({
     if (!matrix) {
       errors.push("Generate a matrix before starting optimization.");
     }
+    errors.push(...parameterErrors);
 
     return {
       warnings,
       errors,
       completeness: Math.max(0, validation.completeness - (errors.length ? 20 : 0)),
     };
-  }, [fleetType, matrix, solver, validation.completeness, validation.errors, validation.warnings]);
+  }, [fleetType, matrix, parameterErrors, solver, validation.completeness, validation.errors, validation.warnings]);
+
+  const saveAlgorithmParameters = async (nextParameters: AlgorithmParameterState) => {
+    if (!project) {
+      throw new Error("Create and save a project before storing algorithm parameters.");
+    }
+    const nextSettings = {
+      ...project.settings,
+      algorithm_parameters: nextParameters,
+    };
+    const saved = await api.updateProject(project.id, {
+      name: project.name,
+      description: project.description ?? undefined,
+      settings: nextSettings,
+      addresses: project.addresses.map((item) => ({
+        id: item.id,
+        label: item.label,
+        address_line: item.address_line,
+        demand: item.demand,
+        is_depot: item.is_depot,
+        latitude: item.latitude ?? null,
+        longitude: item.longitude ?? null,
+        time_window_start_min: item.time_window_start_min ?? null,
+        time_window_end_min: item.time_window_end_min ?? null,
+        notes: item.notes ?? null,
+      })),
+      fleet_units: project.fleet_units.map((item) => ({
+        id: item.id,
+        vehicle_type_id: item.vehicle_type_id,
+        label: item.label,
+        count: item.count,
+        capacity: item.capacity,
+        fixed_cost: item.fixed_cost,
+        cost_per_km: item.cost_per_km,
+        speed_kmh: item.speed_kmh,
+        max_route_distance_km: item.max_route_distance_km ?? null,
+        max_route_time_min: item.max_route_time_min ?? null,
+      })),
+    });
+    setProject(saved);
+    onToast("Parameters saved", "Algorithm parameters were saved into the current project settings.");
+  };
 
   const runSolver = async () => {
     if (!project || !matrix || inputReview.errors.length > 0) return;
@@ -105,8 +168,8 @@ export function OptimizationConsole({
       setCurrentSolution(null);
       const payload =
         solver === "nsga2"
-          ? await api.solveNsga2(project.id, matrix.id, { pop_size: population, generations, seed: 0 })
-          : await api.solveBloodhound(project.id, matrix.id, { num_hunts: hunts, explore_iterations: 120, num_wolves: 12 });
+          ? await api.solveNsga2(project.id, matrix.id, algorithmParameters.nsga2)
+          : await api.solveBloodhound(project.id, matrix.id, algorithmParameters.bloodhound);
       setCurrentJobId(payload.job_id);
       onToast("Job queued", `${solver} job accepted by backend.`);
     } catch (err) {
@@ -157,23 +220,12 @@ export function OptimizationConsole({
           </div>
 
           <div className="mt-5 grid gap-4 md:grid-cols-2">
-            {solver === "nsga2" ? (
-              <>
-                <Field label="Population">
-                  <Input type="number" value={population} onChange={(event) => setPopulation(Number(event.target.value))} />
-                </Field>
-                <Field label="Generations">
-                  <Input type="number" value={generations} onChange={(event) => setGenerations(Number(event.target.value))} />
-                </Field>
-              </>
-            ) : (
-              <>
-                <Field label="Hunts">
-                  <Input type="number" value={hunts} onChange={(event) => setHunts(Number(event.target.value))} />
-                </Field>
-                <Metric title="Fleet mode" value={fleetType} detail="Auto-detected from saved vehicle definitions" />
-              </>
-            )}
+            <Metric
+              title="Parameter set"
+              value={solverLabel(solver)}
+              detail={solver === "nsga2" ? `${algorithmParameters.nsga2.pop_size} pop / ${algorithmParameters.nsga2.generations} gen` : `${algorithmParameters.bloodhound.num_wolves} wolves / ${algorithmParameters.bloodhound.num_hunts} hunts`}
+            />
+            <Metric title="Fleet mode" value={fleetType} detail="Auto-detected from saved vehicle definitions" />
           </div>
 
           {(error || jobError) && (
@@ -185,12 +237,22 @@ export function OptimizationConsole({
           <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <Metric title="Problem type" value={fleetType} detail={solver === "bloodhound" ? "Demand + fleet aware" : "Unit-demand mode"} />
             <Metric title="Customers" value={String(project?.addresses.filter((item) => !item.is_depot).length ?? 0)} detail={depot ? `Depot: ${depot.label}` : "Depot missing"} />
-            <Metric title="Matrix" value={matrix ? "Ready" : "Missing"} detail={matrix ? `${matrix.provider} ${matrix.size}x${matrix.size}` : "Generate in matrix workspace"} />
+            <Metric title="Matrix" value={matrix ? "Ready" : "Missing"} detail={matrix ? `${matrixSourceLabel} ${matrix.size}x${matrix.size}` : "Generate in matrix workspace"} />
           </div>
+
+          {matrix && (
+            <div className="mt-4 rounded-[22px] border border-accent/20 bg-accent/10 px-4 py-3 text-sm text-slate-200">
+              Solvers are using the active matrix snapshot from <span className="font-medium text-white">{matrixSourceLabel}</span>.
+            </div>
+          )}
 
           <ReviewLists warnings={inputReview.warnings} errors={inputReview.errors} />
 
           <div className="mt-6 flex flex-wrap gap-3">
+            <Button onClick={() => setParametersOpen(true)} variant="secondary" className="gap-2">
+              <Settings2 size={16} />
+              Algorithm Parameters
+            </Button>
             <Button onClick={runSolver} disabled={!project || !matrix || busy || solverLocked || inputReview.errors.length > 0} className="gap-2">
               {busy ? <LoaderCircle size={16} className="animate-spin" /> : <Play size={16} />}
               Run {solver === "nsga2" ? "NSGA-II" : "Bloodhound"}
@@ -304,6 +366,14 @@ export function OptimizationConsole({
           </div>
         )}
       </Card>
+      <AlgorithmParametersModal
+        open={parametersOpen}
+        project={project}
+        selectedSolver={solver}
+        onClose={() => setParametersOpen(false)}
+        onSave={saveAlgorithmParameters}
+        onToast={onToast}
+      />
     </div>
   );
 }
@@ -359,15 +429,6 @@ function SolverCard({
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">{label}</div>
-      {children}
-    </div>
-  );
-}
-
 function Metric({ title, value, detail }: { title: string; value: string; detail: string }) {
   return (
     <div className="min-w-0 overflow-hidden rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
@@ -383,7 +444,7 @@ function SummaryPanel({ summary }: { summary: Record<string, unknown> }) {
     ["Problem type", String(summary.problem_type ?? "-")],
     ["Runtime", `${formatMetric(summary.runtime_seconds)} s`],
     ["Warnings", Array.isArray(summary.warnings) ? summary.warnings.join(" | ") || "None" : "None"],
-    ["Parameters", JSON.stringify(summary.algorithm_parameters ?? {}, null, 0)],
+    ["Parameters used in this run", JSON.stringify(summary.algorithm_parameters ?? {}, null, 0)],
   ];
   return (
     <div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4">

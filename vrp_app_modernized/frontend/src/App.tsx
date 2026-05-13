@@ -129,6 +129,7 @@ function App() {
               element={
                 <OptimizeScreen
                   project={project}
+                  setProject={setProject}
                   matrix={matrix}
                   currentJobId={currentJobId}
                   setCurrentJobId={setCurrentJobId}

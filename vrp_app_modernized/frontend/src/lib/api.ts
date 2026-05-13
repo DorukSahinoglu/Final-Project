@@ -5,8 +5,12 @@ import type {
   JobAcceptedResponse,
   JobResponse,
   MatrixResponse,
+  MatrixLoadJsonPayload,
+  ProjectBundle,
   ProjectCreatePayload,
   ProjectRecord,
+  ProjectSavePayload,
+  ProjectSummary,
   ProjectSolutionSummary,
   SolutionResponse,
 } from "@/types/api";
@@ -47,21 +51,34 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<HealthResponse>("/health"),
+  listProjects: () => request<ProjectSummary[]>("/projects"),
   createProject: (payload: ProjectCreatePayload) =>
     request<ProjectRecord>("/projects", { method: "POST", body: JSON.stringify(payload) }),
+  saveProject: (payload: ProjectSavePayload) =>
+    request<ProjectRecord>("/projects/save", { method: "POST", body: JSON.stringify(payload) }),
   updateProject: (projectId: string, payload: ProjectCreatePayload) =>
     request<ProjectRecord>(`/projects/${projectId}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteProject: (projectId: string) =>
+    request<{ message: string }>(`/projects/${projectId}`, { method: "DELETE" }),
   getProject: (projectId: string) => request<ProjectRecord>(`/projects/${projectId}`),
+  exportProject: (projectId: string) => request<ProjectBundle>(`/projects/${projectId}/export`),
+  importProject: (bundle: ProjectBundle) =>
+    request<ProjectRecord>("/projects/import", { method: "POST", body: JSON.stringify({ bundle }) }),
   listProjectSolutions: (projectId: string) => request<ProjectSolutionSummary[]>(`/projects/${projectId}/solutions`),
   geocodeProject: (projectId: string, addressIds: string[] = []) =>
     request<GeocodeResponse>("/geocode", {
       method: "POST",
       body: JSON.stringify({ project_id: projectId, address_ids: addressIds }),
     }),
-  generateMatrix: (projectId: string, speedKmh: number) =>
+  generateMatrix: (projectId: string) =>
     request<MatrixResponse>("/matrix/generate", {
       method: "POST",
-      body: JSON.stringify({ project_id: projectId, speed_kmh: speedKmh }),
+      body: JSON.stringify({ project_id: projectId }),
+    }),
+  loadMatrixJson: (payload: MatrixLoadJsonPayload) =>
+    request<MatrixResponse>("/matrix/load-json", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
   solveNsga2: (projectId: string, matrixId: string, solverParams: Record<string, unknown>) =>
     request<JobAcceptedResponse>("/solve/nsga2", {

@@ -68,6 +68,7 @@ class JobManager:
             job.started_at = datetime.utcnow()
             job.progress = 3.0
             self._append_log(job, "info", "Job started.")
+            self._append_log(job, "info", "Solver parameters received.", {"solver_params": solver_params})
             db.commit()
 
         def progress_callback(payload: dict) -> None:

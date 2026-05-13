@@ -5,6 +5,7 @@ import {
   FileUp,
   LoaderCircle,
   MapPinned,
+  PackageOpen,
   Plus,
   Save,
   ScanSearch,
@@ -14,7 +15,7 @@ import {
 import { api } from "@/lib/api";
 import { detectFleetType, findDuplicateValues, projectValidation } from "@/lib/vrp";
 import { sampleProject } from "@/data/sample-project";
-import type { AddressInput, FleetUnitInput, MatrixResponse, ProjectRecord, SolutionResponse } from "@/types/api";
+import type { AddressInput, FleetUnitInput, MatrixLoadJsonPayload, MatrixResponse, ProjectRecord, SolutionResponse } from "@/types/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -48,7 +49,6 @@ const emptyAddress = (index: number): DraftAddress => ({
   is_depot: false,
   latitude: null,
   longitude: null,
-  service_time_min: 0,
   time_window_start_min: null,
   time_window_end_min: null,
   notes: "",
@@ -77,6 +77,7 @@ export function ProjectWorkflow({
   onToast,
 }: ProjectWorkflowProps) {
   const csvInputRef = useRef<HTMLInputElement | null>(null);
+  const matrixJsonInputRef = useRef<HTMLInputElement | null>(null);
   const [name, setName] = useState(sampleProject.name);
   const [description, setDescription] = useState(sampleProject.description ?? "");
   const [addresses, setAddresses] = useState<DraftAddress[]>(sampleProject.addresses);
@@ -84,6 +85,8 @@ export function ProjectWorkflow({
   const [loadingState, setLoadingState] = useState<"" | "project" | "geocode" | "matrix">("");
   const [error, setError] = useState<string | null>(null);
   const [matrixProgress, setMatrixProgress] = useState(0);
+  const [csvPreview, setCsvPreview] = useState<DraftAddress[] | null>(null);
+  const [pendingDeleteAddressIndex, setPendingDeleteAddressIndex] = useState<number | null>(null);
 
   useEffect(() => {
     if (!project) return;
@@ -108,6 +111,7 @@ export function ProjectWorkflow({
       description,
       status: project?.status ?? "draft",
       settings: project?.settings ?? {},
+      updated_at: project?.updated_at ?? new Date().toISOString(),
       addresses: addresses.map((item, index) => ({
         ...item,
         id: item.id ?? `draft-address-${index}`,
@@ -123,6 +127,13 @@ export function ProjectWorkflow({
 
   const validation = useMemo(() => projectValidation(draftProject, matrix), [draftProject, matrix]);
   const hasExistingProject = Boolean(project?.id);
+  const matrixSourceLabel = matrix
+    ? matrix.provider === "osrm"
+      ? "OSRM generated"
+      : matrix.provider === "json_import"
+        ? "JSON imported"
+        : matrix.provider
+    : "Pending";
 
   const persistProject = async () => {
     try {
@@ -152,25 +163,61 @@ export function ProjectWorkflow({
   };
 
   const geocodeAddresses = async () => {
-    if (!project?.id) return;
+    if (!project?.id) {
+      const message = "Save the project first so geocoding has a real backend project to update.";
+      console.warn("[workflow] geocode blocked:", message);
+      setError(message);
+      onToast("Save project first", message);
+      return;
+    }
+    const pendingIds = addresses
+      .filter((item) => item.latitude == null || item.longitude == null)
+      .map((item) => item.id!)
+      .filter(Boolean);
+    if (pendingIds.length === 0) {
+      onToast("Nothing to geocode", "All saved addresses already have coordinates.");
+      return;
+    }
     try {
       setLoadingState("geocode");
       setError(null);
-      const pendingIds = addresses.filter((item) => item.latitude == null || item.longitude == null).map((item) => item.id!).filter(Boolean);
+      console.info("[workflow] geocode request", { projectId: project.id, addressCount: pendingIds.length });
       await api.geocodeProject(project.id, pendingIds);
       const refreshed = await api.getProject(project.id);
       setProject(refreshed);
       setAddresses(refreshed.addresses);
       onToast("Geocoding complete", `${refreshed.addresses.filter((item) => item.geocode_status === "ready").length} addresses now have coordinates.`);
     } catch (err) {
+      console.error("[workflow] geocode failed", err);
       setError(err instanceof Error ? err.message : "Geocoding failed.");
+      onToast("Geocoding failed", err instanceof Error ? err.message : "Geocoding failed.");
     } finally {
       setLoadingState("");
     }
   };
 
   const generateMatrix = async () => {
-    if (!project?.id) return;
+    if (!project?.id) {
+      const message = "Save the project first so matrix generation can store a real backend snapshot.";
+      console.warn("[workflow] matrix generation blocked:", message);
+      setError(message);
+      onToast("Save project first", message);
+      return;
+    }
+    if (addresses.length <= 1) {
+      const message = "Add a depot and at least one customer before generating a matrix.";
+      setError(message);
+      onToast("Matrix blocked", message);
+      return;
+    }
+    const missingCoords = addresses.filter((item) => item.latitude == null || item.longitude == null).map((item) => item.label);
+    if (missingCoords.length > 0) {
+      const message = `Geocode all addresses first. Missing coordinates for: ${missingCoords.join(", ")}`;
+      console.warn("[workflow] matrix generation blocked:", message);
+      setError(message);
+      onToast("Matrix blocked", message);
+      return;
+    }
     let timer: number | undefined;
     try {
       setLoadingState("matrix");
@@ -179,13 +226,15 @@ export function ProjectWorkflow({
       timer = window.setInterval(() => {
         setMatrixProgress((value) => (value >= 88 ? value : value + 7));
       }, 180);
-      const baselineSpeed = fleet[0]?.speed_kmh ?? 35;
-      const nextMatrix = await api.generateMatrix(project.id, baselineSpeed);
+      console.info("[workflow] matrix generation request", { projectId: project.id, addressCount: addresses.length });
+      const nextMatrix = await api.generateMatrix(project.id);
       setMatrixProgress(100);
       setMatrix(nextMatrix);
-      onToast("Matrix generated", `${nextMatrix.provider} matrix is ready for solver execution.`);
+      onToast("Matrix generated", `${matrixSourceLabelFromResponse(nextMatrix)} matrix is ready for solver execution.`);
     } catch (err) {
+      console.error("[workflow] matrix generation failed", err);
       setError(err instanceof Error ? err.message : "Matrix generation failed.");
+      onToast("Matrix generation failed", err instanceof Error ? err.message : "Matrix generation failed.");
     } finally {
       if (timer) window.clearInterval(timer);
       window.setTimeout(() => setMatrixProgress(0), 500);
@@ -205,44 +254,182 @@ export function ProjectWorkflow({
   const onCsvPicked = async (file: File | null) => {
     if (!file) return;
     try {
+      setError(null);
       const text = await file.text();
-      // TODO: upgrade parser to robust quoted CSV handling if customers include commas in free text.
-      const lines = text.split(/\r?\n/).filter(Boolean);
-      if (lines.length < 2) throw new Error("CSV must include a header row and at least one address row.");
-      const headers = lines[0].split(",").map((item) => item.trim().toLowerCase());
-      const rows = lines.slice(1).map((line) => line.split(","));
-      const imported = rows.map((cells, index) => {
-        const read = (key: string) => {
-          const cellIndex = headers.indexOf(key);
-          return cellIndex >= 0 ? cells[cellIndex]?.trim() ?? "" : "";
-        };
+      const rows = parseCsvRows(text);
+      if (rows.length === 0) {
+        throw new Error("CSV is empty. Provide at least one depot row and one customer row.");
+      }
+
+      const firstRow = rows[0] ?? [];
+      const hasHeader = looksLikeHeader(firstRow);
+      const dataRows = hasHeader ? rows.slice(1) : rows;
+      if (dataRows.length === 0) {
+        throw new Error("CSV does not contain any address rows after the header.");
+      }
+
+      const rowErrors: string[] = [];
+      const imported: DraftAddress[] = dataRows.map((cells, index) => {
+        const name = (cells[0] ?? "").trim();
+        const addressText = (cells[1] ?? "").trim();
+        const rowNumber = hasHeader ? index + 2 : index + 1;
+
+        if (!name) rowErrors.push(`Row ${rowNumber}: missing name/id in column 1.`);
+        if (!addressText) rowErrors.push(`Row ${rowNumber}: missing address text in column 2.`);
+
         return {
           ...emptyAddress(addresses.length + index),
-          label: read("label") || read("name") || `Customer ${addresses.length + index + 1}`,
-          address_line: read("address") || read("address_line"),
-          demand: Number(read("demand") || 1),
-          latitude: read("latitude") ? Number(read("latitude")) : null,
-          longitude: read("longitude") ? Number(read("longitude")) : null,
-          service_time_min: Number(read("service_time_min") || 0),
-          notes: read("notes"),
-          is_depot: /^(1|true|yes)$/i.test(read("is_depot")),
-          geocode_status: read("latitude") && read("longitude") ? "ready" : "pending",
+          label: name || `Imported ${index + 1}`,
+          address_line: addressText,
+          demand: index === 0 ? 0 : 1,
+          is_depot: index === 0,
+          geocode_status: "pending",
         } satisfies DraftAddress;
       });
-      setAddresses((items) => [...items, ...imported]);
-      onToast("CSV imported", `${imported.length} addresses were added to the project draft.`);
+
+      if (rowErrors.length > 0) {
+        throw new Error(rowErrors.join(" "));
+      }
+
+      setCsvPreview(imported);
+      onToast("CSV parsed", `${imported.length} rows are ready to import. Review and confirm below.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "CSV import failed.");
+      setCsvPreview(null);
+      onToast("CSV import failed", err instanceof Error ? err.message : "CSV import failed.");
+    } finally {
+      if (csvInputRef.current) csvInputRef.current.value = "";
+    }
+  };
+
+  const commitCsvImport = () => {
+    if (!csvPreview || csvPreview.length === 0) return;
+    setAddresses((items) => {
+      const normalizedExisting = items.map((item) => ({ ...item, is_depot: false }));
+      return [...normalizedExisting, ...csvPreview];
+    });
+    onToast("CSV imported", `${csvPreview.length} addresses were added to the project draft. The first imported row was marked as depot.`);
+    setCsvPreview(null);
+  };
+
+  const cancelCsvImport = () => {
+    setCsvPreview(null);
+  };
+
+  const onMatrixJsonPicked = async (file: File | null) => {
+    if (!file || !project?.id) return;
+    try {
+      setLoadingState("matrix");
+      setError(null);
+      const text = await file.text();
+      const parsed = JSON.parse(text) as Omit<MatrixLoadJsonPayload, "project_id"> | number[][];
+      const payload = Array.isArray(parsed)
+        ? { project_id: project.id, distance_matrix: parsed }
+        : {
+            project_id: project.id,
+            distance_matrix: parsed.distance_matrix,
+            time_matrix: parsed.time_matrix,
+            node_ids: parsed.node_ids,
+            address_ids: parsed.address_ids,
+            metadata: parsed.metadata,
+          };
+      if (!payload.distance_matrix) {
+        throw new Error("Matrix JSON must include at least distance_matrix.");
+      }
+      console.info("[workflow] matrix json load request", {
+        projectId: project.id,
+        hasTimeMatrix: Boolean("time_matrix" in payload && payload.time_matrix),
+      });
+      const loadedMatrix = await api.loadMatrixJson(payload);
+      setMatrix(loadedMatrix);
+      onToast("Matrix JSON loaded", `Imported ${loadedMatrix.size}x${loadedMatrix.size} matrix snapshot from file. Source: ${matrixSourceLabelFromResponse(loadedMatrix)}.`);
+    } catch (err) {
+      console.error("[workflow] matrix json load failed", err);
+      setError(err instanceof Error ? err.message : "Matrix JSON import failed.");
+      onToast("Matrix JSON import failed", err instanceof Error ? err.message : "Matrix JSON import failed.");
+    } finally {
+      setLoadingState("");
+      if (matrixJsonInputRef.current) matrixJsonInputRef.current.value = "";
+    }
+  };
+
+  const openMatrixJsonPicker = () => {
+    if (loadingState !== "") return;
+    if (!project?.id) {
+      const message = "Save the project first before importing a matrix JSON file.";
+      console.warn("[workflow] matrix picker blocked:", message);
+      setError(message);
+      onToast("Save project first", message);
+      return;
+    }
+    matrixJsonInputRef.current?.click();
+  };
+
+  const requestDeleteAddress = (index: number) => {
+    setPendingDeleteAddressIndex(index);
+  };
+
+  const confirmDeleteAddress = async () => {
+    if (pendingDeleteAddressIndex == null) return;
+    const index = pendingDeleteAddressIndex;
+    const target = addresses[index];
+    setPendingDeleteAddressIndex(null);
+    if (!target) return;
+
+    const nextAddresses = addresses
+      .filter((_, itemIndex) => itemIndex !== index)
+      .map((item, itemIndex, list) => ({
+        ...item,
+        is_depot: target.is_depot ? itemIndex === 0 : item.is_depot,
+      }));
+
+    if (nextAddresses.length === 0) {
+      setError("At least one address must remain in the project.");
+      onToast("Delete blocked", "At least one address must remain in the project.");
+      return;
+    }
+
+    if (!project?.id) {
+      setAddresses(nextAddresses);
+      setMatrix(null);
+      setCurrentJobId(null);
+      setCurrentSolution(null);
+      onToast("Address removed", target.is_depot ? "Depot deleted. The next address was promoted to depot and the matrix was cleared." : "Address removed from the draft and matrix state cleared.");
+      return;
+    }
+
+    try {
+      setLoadingState("project");
+      setError(null);
+      const saved = await api.updateProject(project.id, {
+        name,
+        description,
+        settings: project.settings,
+        addresses: nextAddresses,
+        fleet_units: fleet,
+      });
+      setProject(saved);
+      setAddresses(saved.addresses);
+      setMatrix(null);
+      setCurrentJobId(null);
+      setCurrentSolution(null);
+      onToast(
+        "Address deleted",
+        target.is_depot
+          ? "Depot deleted. The next remaining address became the depot. Existing matrix and solution state were cleared."
+          : "Address deleted. Existing matrix and solution state were cleared as outdated."
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Address deletion failed.");
+      onToast("Delete failed", err instanceof Error ? err.message : "Address deletion failed.");
+    } finally {
+      setLoadingState("");
     }
   };
 
   const canSave = validation.errors.length === 0 && loadingState === "";
-  const canGeocode = Boolean(project?.id) && loadingState === "" && addresses.some((item) => item.latitude == null || item.longitude == null);
-  const canGenerateMatrix =
-    Boolean(project?.id) &&
-    loadingState === "" &&
-    addresses.length > 1 &&
-    addresses.every((item) => item.latitude != null && item.longitude != null);
+  const canGeocode = loadingState === "";
+  const canGenerateMatrix = loadingState === "";
 
   return (
     <div className="space-y-5">
@@ -256,7 +443,7 @@ export function ProjectWorkflow({
               <div>
                 <div className="text-lg font-semibold text-white">Usable optimization workflow</div>
                 <div className="mt-1 text-sm text-slate-400">
-                  Save real fleets and addresses, geocode them, generate a backend matrix, then move directly into solver review.
+                  Save real fleets and addresses, geocode them with Google, generate an OSRM matrix or load JSON, then move directly into solver review.
                 </div>
               </div>
             </div>
@@ -312,16 +499,19 @@ export function ProjectWorkflow({
           <div className="mt-5 grid gap-4 sm:grid-cols-3">
             <Metric title="Addresses" value={String(addresses.length)} detail={`${geocodedCount}/${addresses.length} geocoded`} />
             <Metric title="Fleet units" value={String(fleet.reduce((sum, item) => sum + item.count, 0))} detail={`${fleet.length} vehicle profiles`} />
-            <Metric title="Matrix" value={matrix ? "Ready" : "Pending"} detail={matrix ? `${matrix.provider} ${matrix.size}x${matrix.size}` : "Generate after geocoding"} />
+            <Metric title="Matrix" value={matrix ? "Ready" : "Pending"} detail={matrix ? `${matrixSourceLabel} ${matrix.size}x${matrix.size}` : "Generate after geocoding"} />
           </div>
         </Card>
 
         <Card className="p-6">
           <SectionHeader title="Backend actions" subtitle="Use real API actions only. No fake execution states remain." badge="Live" />
           <div className="mt-5 space-y-4">
+            <div className="rounded-[24px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-300">
+              Google API is used for geocoding only. Distance and time matrices are generated with OSRM.
+            </div>
             <ActionRow
               title="Geocode addresses"
-              description="Uses Google API key when configured, otherwise falls back to Nominatim."
+              description="Uses the saved Google Geocoding API key to turn address text into latitude and longitude."
               action={
                 <Button onClick={geocodeAddresses} disabled={!canGeocode} variant="secondary" className="gap-2">
                   {loadingState === "geocode" ? <LoaderCircle size={16} className="animate-spin" /> : <MapPinned size={16} />}
@@ -331,12 +521,31 @@ export function ProjectWorkflow({
             />
             <ActionRow
               title="Generate distance/time matrix"
-              description="Creates a real backend matrix snapshot used by both Bloodhound and NSGA-II."
+              description="Creates a real backend OSRM matrix snapshot from saved coordinates. No Google API is used here."
               action={
                 <Button onClick={generateMatrix} disabled={!canGenerateMatrix} variant="secondary" className="gap-2">
                   {loadingState === "matrix" ? <LoaderCircle size={16} className="animate-spin" /> : <ScanSearch size={16} />}
-                  Generate matrix
+                  Generate Matrix with OSRM
                 </Button>
+              }
+            />
+            <ActionRow
+              title="Load matrix from JSON"
+              description="Import a raw distance matrix or a distance+time matrix JSON file and use it exactly like a generated matrix."
+              action={
+                <>
+                  <Button onClick={openMatrixJsonPicker} disabled={loadingState !== ""} variant="secondary" className="gap-2">
+                    <PackageOpen size={16} />
+                    Load Matrix JSON
+                  </Button>
+                  <input
+                    ref={matrixJsonInputRef}
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={(event) => void onMatrixJsonPicked(event.target.files?.[0] ?? null)}
+                  />
+                </>
               }
             />
             <AnimatePresence>
@@ -362,7 +571,7 @@ export function ProjectWorkflow({
       <Card className="p-6">
         <SectionHeader
           title="Address management"
-          subtitle="Manual editing, CSV import, depot selection, demand validation, per-address geocoding state."
+          subtitle="Manual editing, CSV import, depot selection, demand validation, per-address geocoding state. CSV uses column 1 as name and column 2 as address."
           badge={`${addresses.length} rows`}
         />
 
@@ -384,11 +593,75 @@ export function ProjectWorkflow({
           />
         </div>
 
+        {matrix && (
+          <div className="mt-5 rounded-[24px] border border-accent/20 bg-accent/10 p-4">
+            <div className="text-sm font-medium text-white">Active matrix snapshot</div>
+            <div className="mt-2 break-words text-sm text-slate-300">
+              {matrixSourceLabel}. Google API is used only for geocoding. Distance and time matrices come from OSRM or imported JSON.
+            </div>
+          </div>
+        )}
+
+        <AnimatePresence>
+          {csvPreview && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className="mt-5 rounded-[28px] border border-accent/20 bg-accent/10 p-5"
+            >
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-white">CSV import preview</div>
+                  <div className="mt-1 text-sm text-slate-300">
+                    First imported row will be the depot. Extra columns were ignored safely.
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  <Button variant="secondary" onClick={cancelCsvImport}>
+                    Cancel
+                  </Button>
+                  <Button onClick={commitCsvImport}>
+                    Add Imported Rows
+                  </Button>
+                </div>
+              </div>
+              <div className="mt-4 overflow-x-auto rounded-[24px] border border-white/10">
+                <table className="min-w-full divide-y divide-white/10 text-sm">
+                  <thead className="bg-white/[0.03] text-slate-400">
+                    <tr>
+                      {["Type", "Name / ID", "Address", "Demand"].map((heading) => (
+                        <th key={heading} className="px-3 py-3 text-left font-medium">
+                          {heading}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/10 bg-[#09101c]/60">
+                    {csvPreview.map((row, index) => (
+                      <tr key={`csv-preview-${index}`}>
+                        <td className="px-3 py-3">
+                          <Badge className={row.is_depot ? "border-accent/20 bg-accent/10 text-accent" : "border-white/10 bg-white/[0.04] text-slate-300"}>
+                            {row.is_depot ? "Depot" : "Customer"}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-3 text-slate-100">{row.label}</td>
+                        <td className="px-3 py-3 text-slate-300">{row.address_line}</td>
+                        <td className="px-3 py-3 text-slate-300">{row.demand}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         <div className="mt-5 overflow-x-auto rounded-[28px] border border-white/10">
           <table className="min-w-full divide-y divide-white/10 text-sm">
             <thead className="bg-white/[0.03] text-slate-400">
               <tr>
-                {["Depot", "Label", "Address", "Demand", "Lat", "Lon", "Service", "Status", "Notes", ""].map((heading) => (
+                {["Depot", "Label", "Address", "Demand", "Lat", "Lon", "Status", "Notes", ""].map((heading) => (
                   <th key={heading} className="px-3 py-3 text-left font-medium">
                     {heading}
                   </th>
@@ -444,13 +717,6 @@ export function ProjectWorkflow({
                       onChange={(event) => updateAddress(index, { longitude: parseOptionalNumber(event.target.value) }, setAddresses)}
                     />
                   </td>
-                  <td className="w-[100px] px-3 py-3">
-                    <Input
-                      type="number"
-                      value={address.service_time_min ?? 0}
-                      onChange={(event) => updateAddress(index, { service_time_min: Number(event.target.value) }, setAddresses)}
-                    />
-                  </td>
                   <td className="px-3 py-3">
                     <Badge className={statusClass(address.geocode_status ?? "pending")}>{address.geocode_status ?? "pending"}</Badge>
                   </td>
@@ -462,7 +728,7 @@ export function ProjectWorkflow({
                     />
                   </td>
                   <td className="px-3 py-3">
-                    <Button variant="ghost" className="px-3 py-2" onClick={() => setAddresses((items) => items.filter((_, itemIndex) => itemIndex !== index))}>
+                    <Button variant="ghost" className="px-3 py-2" onClick={() => requestDeleteAddress(index)}>
                       <Trash2 size={16} />
                     </Button>
                   </td>
@@ -549,6 +815,18 @@ export function ProjectWorkflow({
           ))}
         </div>
       </Card>
+      <ConfirmDeleteModal
+        open={pendingDeleteAddressIndex != null}
+        title="Delete saved address"
+        message={
+          pendingDeleteAddressIndex != null && addresses[pendingDeleteAddressIndex]?.is_depot
+            ? "You are deleting the current depot. The next remaining address will become the depot, and any existing matrix/solver state will be cleared."
+            : "Delete this address from the project? Any existing matrix/solver state will be cleared because the address set changes."
+        }
+        confirmLabel="Delete Address"
+        onCancel={() => setPendingDeleteAddressIndex(null)}
+        onConfirm={() => void confirmDeleteAddress()}
+      />
     </div>
   );
 }
@@ -628,7 +906,7 @@ function ActionRow({
 }: {
   title: string;
   description: string;
-  action: React.ReactNode;
+  action: ReactNode;
 }) {
   return (
     <div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4">
@@ -663,6 +941,12 @@ function parseOptionalNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function matrixSourceLabelFromResponse(matrix: MatrixResponse) {
+  if (matrix.provider === "osrm") return "OSRM generated";
+  if (matrix.provider === "json_import") return "JSON imported";
+  return matrix.provider;
+}
+
 function updateAddress(index: number, patch: Partial<DraftAddress>, setAddresses: Dispatch<SetStateAction<DraftAddress[]>>) {
   setAddresses((items) =>
     items.map((item, itemIndex) => {
@@ -680,4 +964,117 @@ function updateAddress(index: number, patch: Partial<DraftAddress>, setAddresses
 
 function updateFleet(index: number, patch: Partial<DraftFleet>, setFleet: Dispatch<SetStateAction<DraftFleet[]>>) {
   setFleet((items) => items.map((item, itemIndex) => (itemIndex === index ? { ...item, ...patch } : item)));
+}
+
+function parseCsvRows(text: string) {
+  const normalized = text.replace(/^\uFEFF/, "");
+  const delimiter = detectCsvDelimiter(normalized);
+  const rows: string[][] = [];
+  let currentCell = "";
+  let currentRow: string[] = [];
+  let inQuotes = false;
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    const nextChar = normalized[index + 1];
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        currentCell += '"';
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === delimiter && !inQuotes) {
+      currentRow.push(currentCell.trim());
+      currentCell = "";
+      continue;
+    }
+
+    if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && nextChar === "\n") index += 1;
+      currentRow.push(currentCell.trim());
+      currentCell = "";
+      if (currentRow.some((cell) => cell.length > 0)) rows.push(currentRow);
+      currentRow = [];
+      continue;
+    }
+
+    currentCell += char;
+  }
+
+  if (currentCell.length > 0 || currentRow.length > 0) {
+    currentRow.push(currentCell.trim());
+    if (currentRow.some((cell) => cell.length > 0)) rows.push(currentRow);
+  }
+
+  return rows;
+}
+
+function detectCsvDelimiter(text: string) {
+  const firstLine = text.split(/\r?\n/, 1)[0] ?? "";
+  const commaCount = (firstLine.match(/,/g) ?? []).length;
+  const semicolonCount = (firstLine.match(/;/g) ?? []).length;
+  return semicolonCount > commaCount ? ";" : ",";
+}
+
+function looksLikeHeader(row: string[]) {
+  const first = (row[0] ?? "").trim().toLowerCase();
+  const second = (row[1] ?? "").trim().toLowerCase();
+  const firstLooksLikeHeader = ["name", "customer", "customer/name/id", "id", "label"].includes(first);
+  const secondLooksLikeHeader = ["address", "address text", "full address", "location"].includes(second);
+  return firstLooksLikeHeader || secondLooksLikeHeader;
+}
+
+function ConfirmDeleteModal({
+  open,
+  title,
+  message,
+  confirmLabel,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  message: string;
+  confirmLabel: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AnimatePresence>
+      {open && (
+        <>
+          <motion.button
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onCancel}
+            className="fixed inset-0 z-40 bg-slate-950/65 backdrop-blur-sm"
+          />
+          <motion.div
+            initial={{ opacity: 0, y: 20, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 12, scale: 0.98 }}
+            className="fixed left-1/2 top-24 z-50 w-[min(560px,calc(100%-2rem))] -translate-x-1/2 rounded-[30px] border border-white/10 bg-[#09111f]/95 p-5 shadow-panel backdrop-blur-2xl"
+          >
+            <div className="text-lg font-semibold text-white">{title}</div>
+            <div className="mt-2 text-sm leading-6 text-slate-400">{message}</div>
+            <div className="mt-5 flex justify-end gap-3">
+              <Button variant="secondary" onClick={onCancel}>
+                Cancel
+              </Button>
+              <Button onClick={onConfirm} className="gap-2">
+                <Trash2 size={16} />
+                {confirmLabel}
+              </Button>
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
 }

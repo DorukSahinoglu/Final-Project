@@ -40,7 +40,7 @@ export function SettingsModal({
       setSaving(true);
       const response = await api.updateGoogleSettings(value);
       setSettings(response);
-      onToast("Settings saved", "Google API key stored locally for backend services.");
+      onToast("Settings saved", "Google API key stored locally for geocoding. Distance and time matrices use OSRM.");
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save settings.");
@@ -72,7 +72,7 @@ export function SettingsModal({
               </div>
               <div>
                 <div className="text-lg font-semibold text-white">Google API Settings</div>
-                <div className="text-sm text-slate-400">Stored locally in backend. No key is hardcoded in frontend code.</div>
+                <div className="text-sm text-slate-400">Stored locally in the backend. Google is used for geocoding only, while matrices are generated with OSRM.</div>
               </div>
             </div>
 
@@ -83,6 +83,7 @@ export function SettingsModal({
                 <div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4">
                   <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Google API key</div>
                   <Input type="password" value={value} onChange={(event) => setValue(event.target.value)} placeholder="AIza..." />
+                  <div className="mt-2 text-xs text-slate-500">Enable Google Geocoding API for address-to-coordinate lookup.</div>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4">

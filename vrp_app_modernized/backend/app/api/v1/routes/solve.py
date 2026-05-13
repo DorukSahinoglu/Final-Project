@@ -5,6 +5,7 @@ from app.api.deps import get_db_session
 from app.db import models
 from app.schemas.job import JobAcceptedResponse
 from app.schemas.solve import SolveRequest
+from app.services.solver_params import normalize_solver_params
 from app.workers.manager import job_manager
 
 
@@ -22,7 +23,8 @@ def _validate_job_request(db: Session, payload: SolveRequest) -> None:
 def solve_nsga2(payload: SolveRequest, db: Session = Depends(get_db_session)) -> JobAcceptedResponse:
     try:
         _validate_job_request(db, payload)
-        job_id = job_manager.submit_solver_job(payload.project_id, payload.matrix_id, "nsga2", payload.solver_params)
+        normalized_params = normalize_solver_params("nsga2", payload.solver_params)
+        job_id = job_manager.submit_solver_job(payload.project_id, payload.matrix_id, "nsga2", normalized_params)
         return JobAcceptedResponse(job_id=job_id, status="queued")
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -32,7 +34,8 @@ def solve_nsga2(payload: SolveRequest, db: Session = Depends(get_db_session)) ->
 def solve_bloodhound(payload: SolveRequest, db: Session = Depends(get_db_session)) -> JobAcceptedResponse:
     try:
         _validate_job_request(db, payload)
-        job_id = job_manager.submit_solver_job(payload.project_id, payload.matrix_id, "bloodhound", payload.solver_params)
+        normalized_params = normalize_solver_params("bloodhound", payload.solver_params)
+        job_id = job_manager.submit_solver_job(payload.project_id, payload.matrix_id, "bloodhound", normalized_params)
         return JobAcceptedResponse(job_id=job_id, status="queued")
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

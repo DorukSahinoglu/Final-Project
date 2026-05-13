@@ -22,18 +22,19 @@ This keeps the project editable and uses the same frontend/backend codepaths as 
 
 ## Recommended demo flow
 
-1. Open Settings and save a Google API key if you want Google geocoding and Google distance matrix.
+1. Open Settings and save a Google API key for address geocoding.
 2. In Workflow, click `Load sample`.
 3. Save the project.
 4. Geocode addresses.
-5. Generate matrix.
+5. Generate the matrix with OSRM or load a matrix JSON file.
 6. Run Bloodhound and inspect the solution.
 7. If the fleet is homogeneous, run NSGA-II too.
 8. Open Compare for side-by-side saved solver results.
 
 ## Notes
 
-- If Google API key is empty, geocoding falls back to Nominatim and matrix falls back to haversine.
+- Google API is used for geocoding only.
+- Distance and time matrices are generated with OSRM or loaded from JSON.
 - Updating a saved project clears stale matrices, jobs, and solutions on purpose.
 - CSV import currently expects a simple comma-separated file with headers like:
-  - `label,address,demand,latitude,longitude,service_time_min,notes,is_depot`
+  - `label,address,demand,latitude,longitude,notes,is_depot`
