@@ -26,8 +26,6 @@ export type FleetUnitInput = {
   fixed_cost: number;
   cost_per_km: number;
   speed_kmh: number;
-  max_route_distance_km?: number | null;
-  max_route_time_min?: number | null;
 };
 
 export type ProjectCreatePayload = {
@@ -114,6 +112,13 @@ export type JobAcceptedResponse = {
   status: string;
 };
 
+export type SolveRequestPayload = {
+  project_id: string;
+  matrix_id: string;
+  solver_params: Record<string, unknown>;
+  selected_address_ids?: string[];
+};
+
 export type JobLog = {
   timestamp: string;
   level: string;
@@ -160,6 +165,14 @@ export type SolutionRoute = {
   variable_cost?: number | null;
 };
 
+export type CandidateSolution = {
+  solution_id: string;
+  summary: Record<string, unknown>;
+  routes: SolutionRoute[];
+  analytics: Record<string, unknown>;
+  raw_payload: Record<string, unknown>;
+};
+
 export type SolutionResponse = {
   id: string;
   project_id: string;
@@ -168,6 +181,7 @@ export type SolutionResponse = {
   routes: SolutionRoute[];
   analytics: Record<string, unknown>;
   raw_payload: Record<string, unknown>;
+  candidate_solutions: CandidateSolution[];
   created_at: string;
 };
 

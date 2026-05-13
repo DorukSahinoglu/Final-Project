@@ -50,7 +50,6 @@ export const sampleProject: ProjectCreatePayload = {
       fixed_cost: 65,
       cost_per_km: 9.5,
       speed_kmh: 32,
-      max_route_time_min: 420,
     },
   ],
 };

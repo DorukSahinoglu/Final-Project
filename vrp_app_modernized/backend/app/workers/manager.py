@@ -27,7 +27,7 @@ class JobManager:
         self.executor = ThreadPoolExecutor(max_workers=settings.job_max_workers, thread_name_prefix="pulseroute-job")
         self.solver_runtime = SolverRuntimeService()
 
-    def submit_solver_job(self, project_id: str, matrix_id: str, solver_key: str, solver_params: dict) -> str:
+    def submit_solver_job(self, project_id: str, matrix_id: str, solver_key: str, solver_params: dict, selected_address_ids: list[str] | None = None) -> str:
         with SessionLocal() as db:
             job = models.Job(
                 id=new_id(),
@@ -43,7 +43,7 @@ class JobManager:
             db.commit()
             job_id = job.id
 
-        self.executor.submit(self._run_solver_job, job_id, solver_params)
+        self.executor.submit(self._run_solver_job, job_id, solver_params, selected_address_ids or [])
         return job_id
 
     def cancel_job(self, job_id: str) -> None:
@@ -51,14 +51,22 @@ class JobManager:
             job = db.get(models.Job, job_id)
             if job is None:
                 raise ValueError("Job not found.")
+            if job.status in {"completed", "failed", "cancelled"}:
+                self._append_log(job, "warning", "Cancellation ignored because the job is already finished.")
+                db.commit()
+                return
             job.cancel_requested = True
             if job.status == "queued":
                 job.status = "cancelled"
                 job.completed_at = datetime.utcnow()
+                job.message = "Job cancelled before execution."
+            elif job.status == "running":
+                job.status = "cancelling"
+                job.message = "Cancellation requested. Waiting for solver to stop safely."
             self._append_log(job, "warning", "Cancellation requested.")
             db.commit()
 
-    def _run_solver_job(self, job_id: str, solver_params: dict) -> None:
+    def _run_solver_job(self, job_id: str, solver_params: dict, selected_address_ids: list[str]) -> None:
         stop_flag = [False]
         with SessionLocal() as db:
             job = db.get(models.Job, job_id)
@@ -68,7 +76,7 @@ class JobManager:
             job.started_at = datetime.utcnow()
             job.progress = 3.0
             self._append_log(job, "info", "Job started.")
-            self._append_log(job, "info", "Solver parameters received.", {"solver_params": solver_params})
+            self._append_log(job, "info", "Solver parameters received.", {"solver_params": solver_params, "selected_address_ids": selected_address_ids})
             db.commit()
 
         def progress_callback(payload: dict) -> None:
@@ -101,19 +109,34 @@ class JobManager:
                     matrix=matrix,
                     solver_key=job.solver_key or "nsga2",
                     solver_params=solver_params,
+                    selected_address_ids=selected_address_ids,
                     progress_callback=progress_callback,
                     stop_flag=stop_flag,
                 )
+                self._append_log(job, "info", "Raw solver output captured.", result.get("debug", {}).get("raw_solver_output", {}))
+                self._append_log(job, "info", "Normalized solver output prepared.", result.get("debug", {}).get("normalized_output", {}))
 
                 if stop_flag[0]:
                     job.status = "cancelled"
                     job.progress = min(job.progress, 99.0)
+                    job.message = "Job cancelled by user."
                     self._append_log(job, "warning", "Job cancelled before completion.")
                 else:
                     primary = result["primary_solution"]
+                    candidate_solutions = result.get("solutions", [])
                     runtime_seconds = max(0.0, (datetime.utcnow() - (job.started_at or datetime.utcnow())).total_seconds())
                     primary["summary"]["runtime_seconds"] = round(runtime_seconds, 3)
                     primary["summary"]["algorithm_parameters"] = solver_params
+                    for item in candidate_solutions:
+                        item["summary"]["runtime_seconds"] = round(runtime_seconds, 3)
+                        item["summary"]["algorithm_parameters"] = solver_params
+                    primary_raw_payload = {
+                        **primary["raw_payload"],
+                        "candidate_solutions": candidate_solutions,
+                        "objective_names": result.get("objective_names", []),
+                        "warnings": result.get("warnings", []),
+                        "metadata": result.get("metadata", {}),
+                    }
                     solution = models.Solution(
                         id=new_id(),
                         project_id=project.id,
@@ -121,7 +144,7 @@ class JobManager:
                         summary_json=dumps(primary["summary"]),
                         routes_json=dumps(primary["routes"]),
                         analytics_json=dumps(primary["analytics"]),
-                        raw_payload_json=dumps(primary["raw_payload"]),
+                        raw_payload_json=dumps(primary_raw_payload),
                     )
                     db.add(solution)
                     db.flush()
@@ -140,6 +163,7 @@ class JobManager:
                     return
                 job.status = "cancelled"
                 job.completed_at = datetime.utcnow()
+                job.message = "Job cancelled by user."
                 job.error_json = dumps({"message": str(exc)})
                 self._append_log(job, "warning", str(exc))
                 db.commit()
@@ -178,12 +202,19 @@ class JobManager:
 
     def _append_log(self, job: models.Job, level: str, message: str, context: dict | None = None) -> None:
         items = loads(job.logs_json, [])
+        normalized_context: dict
+        if context is None:
+            normalized_context = {}
+        elif isinstance(context, dict):
+            normalized_context = context
+        else:
+            normalized_context = {"value": context}
         items.append(
             {
                 "timestamp": datetime.utcnow().isoformat(),
                 "level": level,
                 "message": message,
-                "context": context or {},
+                "context": normalized_context,
             }
         )
         job.logs_json = dumps(items[-200:])

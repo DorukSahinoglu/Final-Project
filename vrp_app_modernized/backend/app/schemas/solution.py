@@ -24,6 +24,14 @@ class RouteRead(BaseModel):
     variable_cost: float | None = None
 
 
+class CandidateSolutionRead(BaseModel):
+    solution_id: str
+    summary: dict = Field(default_factory=dict)
+    routes: list[RouteRead] = Field(default_factory=list)
+    analytics: dict = Field(default_factory=dict)
+    raw_payload: dict = Field(default_factory=dict)
+
+
 class SolutionRead(BaseModel):
     id: str
     project_id: str
@@ -32,4 +40,5 @@ class SolutionRead(BaseModel):
     routes: list[RouteRead] = Field(default_factory=list)
     analytics: dict = Field(default_factory=dict)
     raw_payload: dict = Field(default_factory=dict)
+    candidate_solutions: list[CandidateSolutionRead] = Field(default_factory=list)
     created_at: datetime

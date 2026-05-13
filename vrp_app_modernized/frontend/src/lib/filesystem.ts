@@ -6,10 +6,11 @@ export type FileSystemAdapter = {
   loadWorkspace(): Promise<WorkspaceSnapshot | null>;
   exportProjectBundle(filename: string, bundle: ProjectBundle): Promise<void>;
   importProjectBundle(): Promise<ProjectBundle | null>;
+  saveTextFile(filename: string, content: string, mimeType?: string): Promise<void>;
+  saveJsonFile(filename: string, data: unknown): Promise<void>;
 };
 
-function downloadJson(filename: string, data: unknown) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -18,6 +19,10 @@ function downloadJson(filename: string, data: unknown) {
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
+}
+
+function downloadJson(filename: string, data: unknown) {
+  downloadBlob(filename, new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
 }
 
 function promptJsonFile(): Promise<File | null> {
@@ -49,5 +54,11 @@ export const browserFileSystemAdapter: FileSystemAdapter = {
     if (!file) return null;
     const text = await file.text();
     return JSON.parse(text) as ProjectBundle;
+  },
+  async saveTextFile(filename, content, mimeType = "text/plain;charset=utf-8") {
+    downloadBlob(filename, new Blob([content], { type: mimeType }));
+  },
+  async saveJsonFile(filename, data) {
+    downloadJson(filename, data);
   },
 };

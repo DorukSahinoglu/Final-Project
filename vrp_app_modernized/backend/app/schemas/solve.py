@@ -7,4 +7,4 @@ class SolveRequest(BaseModel):
     project_id: str
     matrix_id: str
     solver_params: dict = Field(default_factory=dict)
-
+    selected_address_ids: list[str] = Field(default_factory=list)

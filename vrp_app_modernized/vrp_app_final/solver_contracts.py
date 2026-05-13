@@ -5,12 +5,21 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .algorithms.bloodhound_bridge import run_bloodhound_with_matrices
-from .algorithms.nsga2_homogeneous import run_nsga2_homogeneous
+from .algorithms.nsga2_better_bridge import run_nsga2_better
 from .schemas import ProblemType, SolverKey, SolverResult, VRPProblemData
 from .schemas import RouteResult, SolutionResult
 
 
 ProgressCallback = Callable[[dict], None]
+
+
+def _sum_matrix_route(route: list[int], matrix: list[list[float]]) -> float:
+    if len(route) < 2:
+        return 0.0
+    total = 0.0
+    for index in range(len(route) - 1):
+        total += float(matrix[route[index]][route[index + 1]])
+    return total
 
 
 @dataclass(slots=True)
@@ -120,7 +129,7 @@ class NSGA2Adapter(SolverAdapter):
                     }
                 )
 
-        raw_results = run_nsga2_homogeneous(
+        raw_results = run_nsga2_better(
             distance_matrix=problem.distance_matrix,
             time_matrix=problem.time_matrix,
             demands=demands,
@@ -173,7 +182,10 @@ class NSGA2Adapter(SolverAdapter):
                     },
                     total_cost=item["cost"],
                     routes=routes,
-                    raw_payload={"chromosome": item["chromosome"]},
+                    raw_payload={
+                        "chromosome": item["chromosome"],
+                        "raw_result": item,
+                    },
                 )
             )
 
@@ -188,6 +200,7 @@ class NSGA2Adapter(SolverAdapter):
             ],
             solutions=solutions,
             metadata={
+                "implementation": "NSGA_2_BETTER",
                 "population_size": int(config.get("pop_size", 60)),
                 "generations": int(config.get("generations", 500)),
                 "seed": int(config.get("seed", 0)),
@@ -258,16 +271,19 @@ class BloodhoundAdapter(SolverAdapter):
             best_state.route_costs,
         ):
             vehicle = expanded_units[vehicle_id]
+            normalized_route_time = _sum_matrix_route(route, problem.time_matrix)
+            normalized_route_distance = _sum_matrix_route(route, problem.distance_matrix)
+            normalized_route_cost = vehicle.fixed_cost + (normalized_route_distance * vehicle.cost_per_km)
             routes.append(
                 RouteResult(
                     nodes=[index_to_node[node] for node in route if node != 0],
                     vehicle_label=vehicle.label,
                     vehicle_type_id=vehicle.vehicle_type_id,
-                    route_distance=route_distance,
-                    route_time=route_time,
-                    route_cost=route_cost,
+                    route_distance=normalized_route_distance,
+                    route_time=normalized_route_time,
+                    route_cost=normalized_route_cost,
                     fixed_cost=vehicle.fixed_cost,
-                    variable_cost=route_cost - vehicle.fixed_cost,
+                    variable_cost=normalized_route_cost - vehicle.fixed_cost,
                 )
             )
 
@@ -286,10 +302,23 @@ class BloodhoundAdapter(SolverAdapter):
                     raw_payload={
                         "vehicle_ids": best_state.vehicle_ids[:],
                         "route_loads": best_state.route_loads[:],
+                        "route_times": best_state.route_times[:],
+                        "route_distances": best_state.route_distances[:],
+                        "route_costs": best_state.route_costs[:],
+                        "raw_result": {
+                            "feasible": best_state.feasible,
+                            "total_cost": best_state.total_cost,
+                            "vehicle_ids": best_state.vehicle_ids[:],
+                            "route_loads": best_state.route_loads[:],
+                            "route_times": best_state.route_times[:],
+                            "route_distances": best_state.route_distances[:],
+                            "route_costs": best_state.route_costs[:],
+                        },
                     },
                 )
             ],
             metadata={
+                "implementation": "bloodhoundtest3_for_app",
                 "num_wolves": int(config.get("num_wolves", 12)),
                 "num_hunts": int(config.get("num_hunts", 20)),
                 "explore_iterations": int(config.get("explore_iterations", 120)),

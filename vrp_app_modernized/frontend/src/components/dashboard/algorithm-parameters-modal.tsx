@@ -3,7 +3,6 @@ import { AnimatePresence, motion } from "framer-motion";
 import { RotateCcw, Save, Settings2, X } from "lucide-react";
 import {
   defaultAlgorithmParameters,
-  mergeAlgorithmParameters,
   parameterFields,
   solverLabel,
   validateAlgorithmParameters,
@@ -16,58 +15,61 @@ import { Input } from "@/components/ui/input";
 
 type Props = {
   open: boolean;
-  project: ProjectRecord | null;
   selectedSolver: SolverKey;
+  parameters: AlgorithmParameterState;
+  project: ProjectRecord | null;
   onClose: () => void;
+  onChangeParameters: (next: AlgorithmParameterState) => void;
   onSave: (next: AlgorithmParameterState) => Promise<void>;
   onToast: (title: string, body: string) => void;
 };
 
 export function AlgorithmParametersModal({
   open,
-  project,
   selectedSolver,
+  parameters,
+  project,
   onClose,
+  onChangeParameters,
   onSave,
   onToast,
 }: Props) {
   const [activeTab, setActiveTab] = useState<SolverKey>(selectedSolver);
-  const [draft, setDraft] = useState<AlgorithmParameterState>(mergeAlgorithmParameters(project?.settings));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setActiveTab(selectedSolver);
-    setDraft(mergeAlgorithmParameters(project?.settings));
     setError(null);
-  }, [open, project?.settings, selectedSolver]);
+  }, [open, selectedSolver]);
 
   const activeFields = useMemo(() => parameterFields[activeTab], [activeTab]);
-  const validationErrors = useMemo(() => validateAlgorithmParameters(draft), [draft]);
+  const validationErrors = useMemo(() => validateAlgorithmParameters(parameters), [parameters]);
 
   const setField = (solver: SolverKey, key: string, value: string | boolean) => {
-    setDraft((current) => {
-      const currentValue = current[solver][key as keyof typeof current[typeof solver]];
-      let nextValue: string | number | boolean = value;
-      if (typeof currentValue === "number" && typeof value === "string") {
-        nextValue = value === "" ? 0 : Number(value);
-      }
-      return {
-        ...current,
-        [solver]: {
-          ...current[solver],
-          [key]: nextValue,
-        },
-      };
-    });
+    const currentValue = parameters[solver][key as keyof typeof parameters[typeof solver]];
+    let nextValue: string | number | boolean = value;
+    if (typeof currentValue === "number" && typeof value === "string") {
+      nextValue = value === "" ? 0 : Number(value);
+    }
+    const next = {
+      ...parameters,
+      [solver]: {
+        ...parameters[solver],
+        [key]: nextValue,
+      },
+    };
+    onChangeParameters(next);
+    setError(null);
   };
 
   const resetDefaults = () => {
-    setDraft((current) => ({
-      ...current,
+    const next = {
+      ...parameters,
       [activeTab]: { ...defaultAlgorithmParameters[activeTab] },
-    }));
+    };
+    onChangeParameters(next);
     onToast("Defaults restored", `${solverLabel(activeTab)} parameters were reset to their safe defaults.`);
   };
 
@@ -79,7 +81,7 @@ export function AlgorithmParametersModal({
     try {
       setSaving(true);
       setError(null);
-      await onSave(draft);
+      await onSave(parameters);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save algorithm parameters.");
@@ -103,16 +105,17 @@ export function AlgorithmParametersModal({
             initial={{ opacity: 0, y: 24, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 12, scale: 0.98 }}
-            className="fixed left-1/2 top-16 z-50 w-[min(980px,calc(100%-2rem))] -translate-x-1/2 rounded-[30px] border border-white/10 bg-[#09111f]/95 p-5 shadow-panel backdrop-blur-2xl"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
           >
+            <div className="flex w-[min(1100px,92vw)] max-h-[88vh] flex-col overflow-hidden rounded-[30px] border border-white/10 bg-[#09111f]/95 p-5 shadow-panel backdrop-blur-2xl">
             <div className="flex items-start justify-between gap-4">
-              <div className="flex items-center gap-3">
+              <div className="min-w-0 flex items-center gap-3">
                 <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-accent/10 text-accent">
                   <Settings2 size={18} />
                 </div>
-                <div>
+                <div className="min-w-0">
                   <div className="text-lg font-semibold text-white">Algorithm Parameters</div>
-                  <div className="text-sm text-slate-400">
+                  <div className="break-words text-sm text-slate-400">
                     Every field here is connected to the real solver execution path and is saved into the current project settings.
                   </div>
                 </div>
@@ -138,11 +141,12 @@ export function AlgorithmParametersModal({
               ))}
             </div>
 
-            <div className="mt-5 grid max-h-[60vh] gap-4 overflow-y-auto pr-1 md:grid-cols-2">
+            <div className="mt-5 min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1">
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {activeFields.map((field) => (
-                <div key={field.key} className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4">
+                <div key={field.key} className="min-w-0 rounded-[24px] border border-white/10 bg-white/[0.03] p-4">
                   <div className="flex items-center gap-2">
-                    <div className="text-sm font-medium text-white">{field.label}</div>
+                    <div className="min-w-0 break-words text-sm font-medium text-white">{field.label}</div>
                     <div className="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-slate-500" title={field.description}>
                       info
                     </div>
@@ -151,18 +155,18 @@ export function AlgorithmParametersModal({
                   <div className="mt-4">
                     {field.type === "boolean" ? (
                       <button
-                        onClick={() => setField(activeTab, field.key, !Boolean(draft[activeTab][field.key as keyof typeof draft[typeof activeTab]]))}
+                        onClick={() => setField(activeTab, field.key, !Boolean(parameters[activeTab][field.key as keyof typeof parameters[typeof activeTab]]))}
                         className={`rounded-2xl border px-4 py-2 text-sm transition ${
-                          draft[activeTab][field.key as keyof typeof draft[typeof activeTab]]
+                          parameters[activeTab][field.key as keyof typeof parameters[typeof activeTab]]
                             ? "border-accent/30 bg-accent/10 text-accent"
                             : "border-white/10 bg-white/[0.03] text-slate-300"
                         }`}
                       >
-                        {Boolean(draft[activeTab][field.key as keyof typeof draft[typeof activeTab]]) ? "Enabled" : "Disabled"}
+                        {Boolean(parameters[activeTab][field.key as keyof typeof parameters[typeof activeTab]]) ? "Enabled" : "Disabled"}
                       </button>
                     ) : field.type === "select" ? (
                       <select
-                        value={String(draft[activeTab][field.key as keyof typeof draft[typeof activeTab]])}
+                        value={String(parameters[activeTab][field.key as keyof typeof parameters[typeof activeTab]])}
                         onChange={(event) => setField(activeTab, field.key, event.target.value)}
                         className="h-11 w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 text-sm text-white outline-none"
                       >
@@ -178,13 +182,14 @@ export function AlgorithmParametersModal({
                         min={field.min}
                         max={field.max}
                         step={field.step ?? (field.type === "integer" ? 1 : 0.01)}
-                        value={String(draft[activeTab][field.key as keyof typeof draft[typeof activeTab]])}
+                        value={String(parameters[activeTab][field.key as keyof typeof parameters[typeof activeTab]])}
                         onChange={(event) => setField(activeTab, field.key, event.target.value)}
                       />
                     )}
                   </div>
                 </div>
               ))}
+              </div>
             </div>
 
             {(error || validationErrors.length > 0) && (
@@ -202,6 +207,7 @@ export function AlgorithmParametersModal({
                 <Save size={16} className={saving ? "animate-pulse" : ""} />
                 Save Parameters
               </Button>
+            </div>
             </div>
           </motion.div>
         </>

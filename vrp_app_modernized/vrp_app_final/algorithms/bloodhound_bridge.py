@@ -17,7 +17,8 @@ def _resolve_root_dir() -> Path:
 
 
 ROOT_DIR = _resolve_root_dir()
-BLOODHOUND_SOURCE = ROOT_DIR / "research" / "algorithms" / "bloodhoundtest3_for_app.py"
+APP_ALGORITHMS_DIR = ROOT_DIR / "app_algorithms"
+BLOODHOUND_SOURCE = APP_ALGORITHMS_DIR / "bloodhoundtest3_for_app.py"
 
 _LEGACY_BLOODHOUND = None
 HUNT_LINE_RE = re.compile(
@@ -228,13 +229,24 @@ def run_bloodhound_with_matrices(
         time_matrix=time_matrix,
         max_route_time_min=max_route_time_min,
     )
+    previous_numba_available = getattr(legacy, "NUMBA_AVAILABLE", None)
+    force_python_time_evaluation = time_matrix is not None and previous_numba_available is not None
+    if force_python_time_evaluation:
+        # The legacy Numba kernels compute travel time from distance / speed and do not
+        # honor the provided OSRM time matrix. Force the Python path so Bloodhound
+        # evaluates the same minute-based travel times used elsewhere in the platform.
+        legacy.NUMBA_AVAILABLE = False
     if progress_callback is not None:
         params["verbose"] = True
-    if progress_callback is None:
-        return legacy.run_bloodhound_hcvrp(problem=problem, **params)
+    try:
+        if progress_callback is None:
+            return legacy.run_bloodhound_hcvrp(problem=problem, **params)
 
-    writer = _ProgressWriter(progress_callback=progress_callback)
-    with contextlib.redirect_stdout(writer):
-        result = legacy.run_bloodhound_hcvrp(problem=problem, **params)
-    writer.flush()
-    return result
+        writer = _ProgressWriter(progress_callback=progress_callback)
+        with contextlib.redirect_stdout(writer):
+            result = legacy.run_bloodhound_hcvrp(problem=problem, **params)
+        writer.flush()
+        return result
+    finally:
+        if force_python_time_evaluation and previous_numba_available is not None:
+            legacy.NUMBA_AVAILABLE = previous_numba_available

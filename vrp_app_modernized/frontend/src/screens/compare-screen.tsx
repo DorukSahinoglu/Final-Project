@@ -100,7 +100,7 @@ export default function CompareScreen({ project, currentSolution, onToast }: Pro
 
       <Card className="p-6">
         <div className="text-lg font-semibold text-white">Objective comparison</div>
-        <div className="mt-1 text-sm text-slate-400">Saved solution summaries from the backend, rendered as a desktop comparison board.</div>
+        <div className="mt-1 text-sm text-slate-400">Saved normalized solution summaries from the backend, using km, minutes, cost, and runtime seconds consistently for both algorithms.</div>
         <div className="mt-5 h-[360px]">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={chartData}>
@@ -126,9 +126,10 @@ function SolutionCard({ title, solution }: { title: string; solution: ProjectSol
         <Badge className="max-w-full border-white/10 bg-white/[0.04] text-slate-300">{new Date(solution.created_at).toLocaleString()}</Badge>
       </div>
       <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <Metric title="Total cost" value={String(solution.analytics.total_cost ?? "-")} />
-        <Metric title="Distance" value={String(solution.analytics.total_distance ?? "-")} />
-        <Metric title="Travel time" value={String(solution.analytics.total_time ?? "-")} />
+        <Metric title="Algorithm" value={String(solution.summary.algorithm_name ?? solution.solver_key)} />
+        <Metric title="Total cost" value={`${String(solution.analytics.total_cost ?? "-")} cost`} />
+        <Metric title="Distance" value={`${String(solution.analytics.total_distance ?? "-")} km`} />
+        <Metric title="Travel time" value={`${String(solution.analytics.total_time ?? "-")} min`} />
         <Metric title="Vehicles used" value={String(solution.analytics.vehicles_used ?? "-")} />
         <Metric title="Route count" value={String(solution.analytics.route_count ?? "-")} />
         <Metric title="Runtime" value={`${String(solution.summary.runtime_seconds ?? "-")} s`} />

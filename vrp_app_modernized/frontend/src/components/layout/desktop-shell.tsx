@@ -130,8 +130,6 @@ export function DesktopShell(props: ShellProps) {
           fixed_cost: item.fixed_cost,
           cost_per_km: item.cost_per_km,
           speed_kmh: item.speed_kmh,
-          max_route_distance_km: item.max_route_distance_km ?? null,
-          max_route_time_min: item.max_route_time_min ?? null,
         })),
       },
       matrix,

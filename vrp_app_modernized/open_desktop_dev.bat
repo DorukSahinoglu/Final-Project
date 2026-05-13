@@ -46,16 +46,8 @@ if not exist "node_modules" (
   )
 )
 
-echo Starting PulseRoute backend...
-start "PulseRoute Backend" cmd /k cd /d "%BACKEND%" ^&^& python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-
-echo Starting PulseRoute frontend...
-start "PulseRoute Frontend" cmd /k cd /d "%FRONTEND%" ^&^& npm run dev
-
-echo Waiting for frontend and backend to boot...
-timeout /t 4 /nobreak >nul
-
-echo Starting PulseRoute desktop shell...
+echo Starting PulseRoute desktop development stack...
+echo This will start backend, frontend, and the Electron shell from one command.
 start "PulseRoute Desktop" cmd /k cd /d "%DESKTOP%" ^&^& npm run dev
 
 exit /b 0

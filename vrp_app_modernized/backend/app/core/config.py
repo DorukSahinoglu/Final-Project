@@ -25,9 +25,16 @@ class Settings(BaseSettings):
             "http://127.0.0.1:5173",
             "http://localhost:4173",
             "http://127.0.0.1:4173",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:8000",
+            "http://127.0.0.1:8000",
+            "tauri://localhost",
+            "capacitor://localhost",
             "null",
         ]
     )
+    cors_origin_regex: str = r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|tauri://localhost|capacitor://localhost|app://.*|null)$"
     job_max_workers: int = 2
     log_level: str = "INFO"
     geocoder_provider: Literal["none", "nominatim"] = "nominatim"

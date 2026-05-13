@@ -9,7 +9,8 @@ from app.schemas.job import JobRead
 from app.schemas.matrix import MatrixSummary
 from app.schemas.project import ProjectCreate, ProjectRead, ProjectSolutionSummary, ProjectUpdate
 from app.schemas.project_bundle import ProjectBundle, ProjectSaveRequest
-from app.schemas.solution import SolutionRead
+from app.schemas.solution import CandidateSolutionRead, RouteRead, SolutionRead
+from app.utils.analytics import build_solution_analytics, ensure_solution_summary, normalize_routes_with_matrices
 from app.utils.ids import new_id
 from app.utils.json import dumps, loads
 
@@ -74,12 +75,27 @@ class ProjectService:
     def list_project_solutions(self, project_id: str) -> list[ProjectSolutionSummary]:
         project = self.get_project(project_id)
         ordered = sorted(project.solutions, key=lambda item: item.created_at, reverse=True)
+        latest_matrix = max(project.matrices, key=lambda item: item.created_at, default=None)
+        distance_matrix = loads(latest_matrix.distance_matrix_json, []) if latest_matrix else None
+        time_matrix = loads(latest_matrix.time_matrix_json, []) if latest_matrix else None
         return [
             ProjectSolutionSummary(
                 id=solution.id,
                 solver_key=solution.solver_key,
-                summary=loads(solution.summary_json, {}),
-                analytics=loads(solution.analytics_json, {}),
+                summary=ensure_solution_summary(
+                    loads(solution.summary_json, {}),
+                    solver_key=solution.solver_key,
+                    total_cost=float(loads(solution.summary_json, {}).get("total_cost", 0.0) or 0.0),
+                    parameters_used=loads(solution.summary_json, {}).get("algorithm_parameters", {}),
+                ),
+                analytics=build_solution_analytics(
+                    routes=normalize_routes_with_matrices(
+                        loads(solution.routes_json, []),
+                        distance_matrix=distance_matrix,
+                        time_matrix=time_matrix,
+                    ),
+                    total_cost=float(loads(solution.summary_json, {}).get("total_cost", 0.0) or 0.0),
+                ),
                 created_at=solution.created_at,
             )
             for solution in ordered
@@ -337,14 +353,64 @@ class ProjectService:
         )
 
     def _solution_to_read(self, solution: models.Solution) -> SolutionRead:
+        project = self.get_project(solution.project_id)
+        latest_matrix = max(project.matrices, key=lambda item: item.created_at, default=None)
+        distance_matrix = loads(latest_matrix.distance_matrix_json, []) if latest_matrix else None
+        time_matrix = loads(latest_matrix.time_matrix_json, []) if latest_matrix else None
+        raw_payload = loads(solution.raw_payload_json, {})
+        summary = loads(solution.summary_json, {})
+        total_cost = float(summary.get("total_cost", 0.0) or 0.0)
+        normalized_routes = normalize_routes_with_matrices(
+            loads(solution.routes_json, []),
+            distance_matrix=distance_matrix,
+            time_matrix=time_matrix,
+        )
+        routes = [RouteRead(**item) for item in normalized_routes]
         return SolutionRead(
             id=solution.id,
             project_id=solution.project_id,
             solver_key=solution.solver_key,
-            summary=loads(solution.summary_json, {}),
-            routes=loads(solution.routes_json, []),
-            analytics=loads(solution.analytics_json, {}),
-            raw_payload=loads(solution.raw_payload_json, {}),
+            summary=ensure_solution_summary(
+                summary,
+                solver_key=solution.solver_key,
+                total_cost=total_cost,
+                parameters_used=summary.get("algorithm_parameters", {}),
+            ),
+            routes=routes,
+            analytics=build_solution_analytics(
+                routes=[item.model_dump(mode="json") for item in routes],
+                total_cost=total_cost,
+            ),
+            raw_payload=raw_payload,
+            candidate_solutions=[
+                CandidateSolutionRead(
+                    solution_id=item.get("summary", {}).get("solution_id", f"candidate-{index + 1}"),
+                    summary=ensure_solution_summary(
+                        item.get("summary", {}),
+                        solver_key=solution.solver_key,
+                        total_cost=float(item.get("summary", {}).get("total_cost", 0.0) or 0.0),
+                        parameters_used=item.get("summary", {}).get("algorithm_parameters", {}),
+                    ),
+                    routes=[
+                        RouteRead(**route)
+                        for route in normalize_routes_with_matrices(
+                            item.get("routes", []),
+                            distance_matrix=distance_matrix,
+                            time_matrix=time_matrix,
+                        )
+                    ],
+                    analytics=build_solution_analytics(
+                        routes=normalize_routes_with_matrices(
+                            item.get("routes", []),
+                            distance_matrix=distance_matrix,
+                            time_matrix=time_matrix,
+                        ),
+                        total_cost=float(item.get("summary", {}).get("total_cost", 0.0) or 0.0),
+                    ),
+                    raw_payload=item.get("raw_payload", {}),
+                )
+                for index, item in enumerate(raw_payload.get("candidate_solutions", []))
+            ],
             created_at=solution.created_at,
         )
 

@@ -63,8 +63,6 @@ const emptyFleet = (index: number): DraftFleet => ({
   fixed_cost: 45,
   cost_per_km: 8,
   speed_kmh: 35,
-  max_route_distance_km: null,
-  max_route_time_min: null,
 });
 
 export function ProjectWorkflow({
@@ -146,8 +144,8 @@ export function ProjectWorkflow({
           fleet_type: fleetType,
           updated_via: "desktop-workflow",
         },
-        addresses,
-        fleet_units: fleet,
+        addresses: addresses.map(normalizeAddressPayload),
+        fleet_units: fleet.map(normalizeFleetPayload),
       };
       const saved = hasExistingProject ? await api.updateProject(project!.id, payload) : await api.createProject(payload);
       setProject(saved);
@@ -405,8 +403,8 @@ export function ProjectWorkflow({
         name,
         description,
         settings: project.settings,
-        addresses: nextAddresses,
-        fleet_units: fleet,
+        addresses: nextAddresses.map(normalizeAddressPayload),
+        fleet_units: fleet.map(normalizeFleetPayload),
       });
       setProject(saved);
       setAddresses(saved.addresses);
@@ -789,27 +787,11 @@ export function ProjectWorkflow({
                   <Input type="number" value={unit.speed_kmh} onChange={(event) => updateFleet(index, { speed_kmh: Number(event.target.value) }, setFleet)} />
                 </Field>
               </div>
-              <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_1fr_auto]">
-                <Field label="Max route distance km">
-                  <Input
-                    type="number"
-                    value={unit.max_route_distance_km ?? ""}
-                    onChange={(event) => updateFleet(index, { max_route_distance_km: parseOptionalNumber(event.target.value) }, setFleet)}
-                  />
-                </Field>
-                <Field label="Max route time min">
-                  <Input
-                    type="number"
-                    value={unit.max_route_time_min ?? ""}
-                    onChange={(event) => updateFleet(index, { max_route_time_min: parseOptionalNumber(event.target.value) }, setFleet)}
-                  />
-                </Field>
-                <div className="flex items-end">
-                  <Button variant="ghost" className="gap-2" onClick={() => setFleet((items) => items.filter((_, itemIndex) => itemIndex !== index))}>
-                    <Trash2 size={16} />
-                    Remove
-                  </Button>
-                </div>
+              <div className="mt-4 flex justify-end">
+                <Button variant="ghost" className="gap-2" onClick={() => setFleet((items) => items.filter((_, itemIndex) => itemIndex !== index))}>
+                  <Trash2 size={16} />
+                  Remove
+                </Button>
               </div>
             </div>
           ))}
@@ -939,6 +921,34 @@ function parseOptionalNumber(value: string) {
   if (!value.trim()) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeAddressPayload(item: DraftAddress) {
+  return {
+    id: item.id,
+    label: item.label,
+    address_line: item.address_line,
+    demand: item.demand,
+    is_depot: item.is_depot,
+    latitude: item.latitude ?? null,
+    longitude: item.longitude ?? null,
+    time_window_start_min: item.time_window_start_min ?? null,
+    time_window_end_min: item.time_window_end_min ?? null,
+    notes: item.notes ?? null,
+  };
+}
+
+function normalizeFleetPayload(item: DraftFleet) {
+  return {
+    id: item.id,
+    vehicle_type_id: item.vehicle_type_id,
+    label: item.label,
+    count: item.count,
+    capacity: item.capacity,
+    fixed_cost: item.fixed_cost,
+    cost_per_km: item.cost_per_km,
+    speed_kmh: item.speed_kmh,
+  };
 }
 
 function matrixSourceLabelFromResponse(matrix: MatrixResponse) {

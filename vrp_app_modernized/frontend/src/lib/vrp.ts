@@ -7,8 +7,6 @@ export function detectFleetType(fleet: Array<FleetUnitRecord | {
   fixed_cost: number;
   cost_per_km: number;
   speed_kmh: number;
-  max_route_distance_km?: number | null;
-  max_route_time_min?: number | null;
 }>): FleetKind {
   if (fleet.length <= 1) return "homogeneous";
   const signature = new Set(
@@ -18,8 +16,6 @@ export function detectFleetType(fleet: Array<FleetUnitRecord | {
         item.fixed_cost,
         item.cost_per_km,
         item.speed_kmh,
-        item.max_route_distance_km ?? "",
-        item.max_route_time_min ?? "",
       ].join("|"),
     ),
   );

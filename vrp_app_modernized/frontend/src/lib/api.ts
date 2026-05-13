@@ -12,6 +12,7 @@ import type {
   ProjectSavePayload,
   ProjectSummary,
   ProjectSolutionSummary,
+  SolveRequestPayload,
   SolutionResponse,
 } from "@/types/api";
 
@@ -27,26 +28,42 @@ export class APIError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-    ...init,
-  });
+  const url = `${API_BASE}${path}`;
+  const method = init?.method ?? "GET";
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "Content-Type": "application/json",
+        ...(init?.headers ?? {}),
+      },
+      ...init,
+    });
 
-  if (!response.ok) {
-    let message = `Request failed with status ${response.status}`;
-    try {
-      const payload = await response.json();
-      message = payload.detail ?? message;
-    } catch {
-      // keep default
+    if (!response.ok) {
+      let message = `Request failed with status ${response.status}`;
+      try {
+        const payload = await response.json();
+        message = payload.detail ?? message;
+      } catch {
+        // keep default
+      }
+      throw new APIError(message, response.status);
     }
-    throw new APIError(message, response.status);
-  }
 
-  return response.json() as Promise<T>;
+    return response.json() as Promise<T>;
+  } catch (error) {
+    if (error instanceof APIError) {
+      throw error;
+    }
+    const origin = typeof window !== "undefined" ? window.location.origin : "unknown-origin";
+    const protocol = typeof window !== "undefined" ? window.location.protocol : "";
+    const hint =
+      protocol === "file:"
+        ? `The desktop app could not reach the backend at ${API_BASE}. Make sure FastAPI is running on http://127.0.0.1:8000 and that desktop/file origins are allowed.`
+        : `The frontend could not reach the backend at ${API_BASE}. Check that FastAPI is running, the API URL is correct, and CORS allows origin ${origin}.`;
+    console.error("[api] network request failed", { url, method, origin, error });
+    throw new APIError(`Network request failed for ${method} ${url}. ${hint}`, 0);
+  }
 }
 
 export const api = {
@@ -80,15 +97,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  solveNsga2: (projectId: string, matrixId: string, solverParams: Record<string, unknown>) =>
+  solveNsga2: (payload: SolveRequestPayload) =>
     request<JobAcceptedResponse>("/solve/nsga2", {
       method: "POST",
-      body: JSON.stringify({ project_id: projectId, matrix_id: matrixId, solver_params: solverParams }),
+      body: JSON.stringify(payload),
     }),
-  solveBloodhound: (projectId: string, matrixId: string, solverParams: Record<string, unknown>) =>
+  solveBloodhound: (payload: SolveRequestPayload) =>
     request<JobAcceptedResponse>("/solve/bloodhound", {
       method: "POST",
-      body: JSON.stringify({ project_id: projectId, matrix_id: matrixId, solver_params: solverParams }),
+      body: JSON.stringify(payload),
     }),
   getJob: (jobId: string) => request<JobResponse>(`/jobs/${jobId}`),
   cancelJob: (jobId: string) => request<{ message: string }>(`/jobs/${jobId}/cancel`, { method: "POST" }),

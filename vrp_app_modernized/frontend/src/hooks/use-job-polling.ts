@@ -8,7 +8,12 @@ export function useJobPolling(jobId: string | null) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!jobId) return;
+    if (!jobId) {
+      setJob(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     let active = true;
     let timer: number | undefined;
 
@@ -24,6 +29,7 @@ export function useJobPolling(jobId: string | null) {
         }
       } catch (err) {
         if (!active) return;
+        console.error("[jobs] polling failed", { jobId, error: err });
         setError(err instanceof Error ? err.message : "Polling failed.");
       } finally {
         if (active) setLoading(false);
