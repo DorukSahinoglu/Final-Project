@@ -29,6 +29,13 @@ class Project(Base, TimestampMixin):
     solutions: Mapped[list["Solution"]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
 
+class AppSetting(Base, TimestampMixin):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+
+
 class Address(Base, TimestampMixin):
     __tablename__ = "addresses"
 

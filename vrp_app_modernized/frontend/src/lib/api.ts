@@ -1,0 +1,119 @@
+import type {
+  GeocodeResponse,
+  GoogleSettingsResponse,
+  HealthResponse,
+  JobAcceptedResponse,
+  JobResponse,
+  MatrixResponse,
+  MatrixLoadJsonPayload,
+  ProjectBundle,
+  ProjectCreatePayload,
+  ProjectRecord,
+  ProjectSavePayload,
+  ProjectSummary,
+  ProjectSolutionSummary,
+  SolveRequestPayload,
+  SolutionResponse,
+} from "@/types/api";
+
+const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "http://127.0.0.1:8000/api";
+
+export class APIError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const url = `${API_BASE}${path}`;
+  const method = init?.method ?? "GET";
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "Content-Type": "application/json",
+        ...(init?.headers ?? {}),
+      },
+      ...init,
+    });
+
+    if (!response.ok) {
+      let message = `Request failed with status ${response.status}`;
+      try {
+        const payload = await response.json();
+        message = payload.detail ?? message;
+      } catch {
+        // keep default
+      }
+      throw new APIError(message, response.status);
+    }
+
+    return response.json() as Promise<T>;
+  } catch (error) {
+    if (error instanceof APIError) {
+      throw error;
+    }
+    const origin = typeof window !== "undefined" ? window.location.origin : "unknown-origin";
+    const protocol = typeof window !== "undefined" ? window.location.protocol : "";
+    const hint =
+      protocol === "file:"
+        ? `The desktop app could not reach the backend at ${API_BASE}. Make sure FastAPI is running on http://127.0.0.1:8000 and that desktop/file origins are allowed.`
+        : `The frontend could not reach the backend at ${API_BASE}. Check that FastAPI is running, the API URL is correct, and CORS allows origin ${origin}.`;
+    console.error("[api] network request failed", { url, method, origin, error });
+    throw new APIError(`Network request failed for ${method} ${url}. ${hint}`, 0);
+  }
+}
+
+export const api = {
+  health: () => request<HealthResponse>("/health"),
+  listProjects: () => request<ProjectSummary[]>("/projects"),
+  createProject: (payload: ProjectCreatePayload) =>
+    request<ProjectRecord>("/projects", { method: "POST", body: JSON.stringify(payload) }),
+  saveProject: (payload: ProjectSavePayload) =>
+    request<ProjectRecord>("/projects/save", { method: "POST", body: JSON.stringify(payload) }),
+  updateProject: (projectId: string, payload: ProjectCreatePayload) =>
+    request<ProjectRecord>(`/projects/${projectId}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteProject: (projectId: string) =>
+    request<{ message: string }>(`/projects/${projectId}`, { method: "DELETE" }),
+  getProject: (projectId: string) => request<ProjectRecord>(`/projects/${projectId}`),
+  exportProject: (projectId: string) => request<ProjectBundle>(`/projects/${projectId}/export`),
+  importProject: (bundle: ProjectBundle) =>
+    request<ProjectRecord>("/projects/import", { method: "POST", body: JSON.stringify({ bundle }) }),
+  listProjectSolutions: (projectId: string) => request<ProjectSolutionSummary[]>(`/projects/${projectId}/solutions`),
+  geocodeProject: (projectId: string, addressIds: string[] = []) =>
+    request<GeocodeResponse>("/geocode", {
+      method: "POST",
+      body: JSON.stringify({ project_id: projectId, address_ids: addressIds }),
+    }),
+  generateMatrix: (projectId: string) =>
+    request<MatrixResponse>("/matrix/generate", {
+      method: "POST",
+      body: JSON.stringify({ project_id: projectId }),
+    }),
+  loadMatrixJson: (payload: MatrixLoadJsonPayload) =>
+    request<MatrixResponse>("/matrix/load-json", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  solveNsga2: (payload: SolveRequestPayload) =>
+    request<JobAcceptedResponse>("/solve/nsga2", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  solveBloodhound: (payload: SolveRequestPayload) =>
+    request<JobAcceptedResponse>("/solve/bloodhound", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  getJob: (jobId: string) => request<JobResponse>(`/jobs/${jobId}`),
+  cancelJob: (jobId: string) => request<{ message: string }>(`/jobs/${jobId}/cancel`, { method: "POST" }),
+  getSolution: (solutionId: string) => request<SolutionResponse>(`/solutions/${solutionId}`),
+  getGoogleSettings: () => request<GoogleSettingsResponse>("/settings/google"),
+  updateGoogleSettings: (googleApiKey: string) =>
+    request<GoogleSettingsResponse>("/settings/google", {
+      method: "PUT",
+      body: JSON.stringify({ google_api_key: googleApiKey }),
+    }),
+};

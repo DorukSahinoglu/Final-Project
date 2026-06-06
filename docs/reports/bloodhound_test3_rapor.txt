@@ -1,0 +1,2170 @@
+\section{Advanced Metaheuristic Optimization Framework: BloodhoundTest3}
+
+BloodhoundTest3 is the final routing metaheuristic used in this study.
+The algorithm is designed mainly for heterogeneous and constraint-heavy vehicle routing problems rather than for a very clean homogeneous CVRP setting.
+This distinction is important because the method contains several mechanisms whose value becomes visible only when routing, fleet assignment and feasibility constraints interact with each other.
+Vehicle reassignment, route-count pressure, strategic oscillation, split decoding with vehicle choice, and route-level structural repair are all meaningful decisions when vehicles have different capacities, fixed costs, distance costs or speeds.
+In a homogeneous fleet, these decisions partly collapse into simpler rules.
+For that reason, BloodhoundTest3 can still be tested on homogeneous instances, but its main design motivation is more realistic heterogeneous routing.
+
+The method was developed after observing a typical behavior in large routing experiments.
+The search improves very quickly at the beginning, mostly because easy route ordering errors and obvious customer placements are corrected.
+After that point, the improvement rate drops.
+The remaining gap is usually not caused by one badly ordered customer inside a route.
+It is more often caused by a wrong route partition, a weak vehicle assignment, an over-stabilized elite region, or a route community that cannot be fixed by a single relocate move.
+BloodhoundTest3 therefore treats the solution as a structural object.
+It does not only ask whether a move reduces cost immediately; it also asks whether the new route structure is easier to repair and whether it keeps the population from collapsing into the same solution family.
+
+In methodological terms, the algorithm combines population search, blood-based acceptance, strategic oscillation, adaptive large-neighborhood search ideas, route pathology diagnostics, elite/archive memory, giant-tour recombination, split decoding, route-pool reconstruction, ejection chains, and small exact subproblem optimization.
+The combination may look heavy at first.
+However, the components are not independent decorations.
+Each component addresses a failure mode that appeared during search: premature convergence, capacity barriers, weak diversity, route-boundary mistakes, ineffective local moves, or late-stage stagnation.
+This report explains those mechanisms in detail and leaves the numerical result section open for the final experimental table.
+
+\subsection{Notation Summary}
+
+The notation used in the rest of the section is summarized before the algorithmic explanation.
+This makes the later formulas easier to follow.
+\[
+\begin{aligned}
+G&=(V,E) && \text{routing graph}\\
+0& && \text{depot node}\\
+V_c&=V\setminus\{0\} && \text{customer set}\\
+q_i& && \text{demand of customer }i\\
+d_{ij}& && \text{distance between nodes }i\text{ and }j\\
+\mathcal{K}& && \text{set of vehicle types}\\
+Q_k& && \text{capacity of vehicle type }k\\
+\gamma_k& && \text{variable distance cost of vehicle type }k\\
+F_k& && \text{fixed usage cost of vehicle type }k\\
+u_k& && \text{speed of vehicle type }k\\
+m_k& && \text{available count of vehicle type }k
+\end{aligned}
+\]
+For solution-level notation:
+\[
+\begin{aligned}
+S& && \text{solution state}\\
+R_r& && \text{route }r\\
+k_r& && \text{vehicle type assigned to route }r\\
+L_r& && \text{route load}\\
+D_r& && \text{route distance}\\
+C_r& && \text{route cost}\\
+f(S)& && \text{total solution cost}\\
+\phi(S)& && \text{active-regime feasibility}\\
+\phi_h(S)& && \text{hard feasibility}\\
+E(S)& && \text{edge signature of solution }S\\
+\beta_r& && \text{badness score of route }r\\
+B_i& && \text{blood value of wolf }i
+\end{aligned}
+\]
+The algorithm uses both route-based and giant-tour-based representations.
+The route representation is better for feasibility and local repair, while the giant tour representation is better for recombination and split decoding.
+This dual representation is one of the main structural differences between the final version and the earlier route-matrix-only versions.
+
+\subsection{General Problem Setting}
+
+The problem is defined on a graph:
+\[
+G=(V,E)
+\]
+where $V$ is the node set and $E$ is the edge set.
+The depot is represented by node $0$.
+The customer set is:
+\[
+V_c=V\setminus\{0\}
+\]
+Each customer $i\in V_c$ has a demand:
+\[
+q_i>0
+\]
+and may also have a service time:
+\[
+s_i\ge 0
+\]
+If time windows are active, customer $i$ has:
+\[
+[a_i,b_i]
+\]
+where $a_i$ is the earliest allowed service time and $b_i$ is the latest allowed service time.
+
+The fleet is represented by a set of vehicle types:
+\[
+\mathcal{K}=\{1,2,\dots,K\}
+\]
+For each vehicle type $k\in\mathcal{K}$ the model stores:
+\begin{itemize}
+    \item $Q_k$: capacity,
+    \item $\gamma_k$: variable cost per distance,
+    \item $F_k$: fixed activation cost,
+    \item $u_k$: speed,
+    \item $m_k$: maximum available count.
+\end{itemize}
+This is the reason the algorithm cannot treat route construction and vehicle assignment as fully separate tasks.
+A route that is cheap under one vehicle type may be infeasible under another one.
+Also, using a very large vehicle for a small route may be wasteful if fixed costs exist.
+
+The distance from node $i$ to node $j$ is:
+\[
+d_{ij}
+\]
+The travel time for vehicle type $k$ is:
+\[
+\tau_{ij}^k=\frac{d_{ij}}{u_k}
+\]
+When all speeds are equal, this formula collapses into the ordinary distance-based time calculation.
+But the implementation keeps the speed term because the algorithm is intended for richer HCVRP/HFVRP cases.
+
+\subsection{Route Cost and Objective Function}
+
+A route is written as:
+\[
+R_r=(0,i_1,i_2,\dots,i_p,0)
+\]
+where the route starts and ends at the depot.
+The vehicle type assigned to route $R_r$ is $k_r$.
+
+The route load is:
+\[
+L_r=\sum_{i\in R_r\cap V_c} q_i
+\]
+The route distance is:
+\[
+D_r=\sum_{t=0}^{|R_r|-2}d_{R_r(t),R_r(t+1)}
+\]
+The basic route cost is:
+\[
+C_r=F_{k_r}+\gamma_{k_r}D_r
+\]
+The total solution cost is:
+\[
+f(S)=\sum_{r=1}^{m}C_r
+\]
+where $m$ is the number of active routes.
+
+In a homogeneous CVRP, usually:
+\[
+F_k=0,\quad \gamma_k=1,\quad Q_k=Q
+\]
+for all vehicles.
+Then the objective mostly becomes:
+\[
+f(S)=\sum_{r=1}^{m}D_r
+\]
+But this is not the general case of BloodhoundTest3.
+In the intended heterogeneous case, the same customer partition can have different cost depending on vehicle assignment:
+\[
+f(S)=\sum_{r=1}^{m}(F_{k_r}+\gamma_{k_r}D_r)
+\]
+So the algorithm must keep checking both routing and fleet compatibility.
+
+\subsection{Feasibility Conditions}
+
+The strict customer coverage condition is:
+\[
+\chi_i(S)=1 \qquad \forall i\in V_c
+\]
+where $\chi_i(S)$ is the number of times customer $i$ appears in the solution.
+If $\chi_i(S)=0$, the customer is missing.
+If $\chi_i(S)>1$, the customer is duplicated.
+Both cases are invalid.
+
+Capacity feasibility for route $r$ is:
+\[
+L_r\le Q_{k_r}
+\]
+Vehicle availability is:
+\[
+n_k(S)\le m_k \qquad \forall k\in\mathcal{K}
+\]
+where $n_k(S)$ is the number of routes using vehicle type $k$.
+
+If time windows are active, the arrival/service time $t_i$ must satisfy:
+\[
+a_i\le t_i\le b_i
+\]
+If a maximum route duration is defined:
+\[
+T_r\le \overline{T}
+\]
+for every route.
+
+BloodhoundTest3 distinguishes two feasibility indicators.
+The first one is regime feasibility:
+\[
+\phi(S)
+\]
+The second one is strict hard feasibility:
+\[
+\phi_h(S)
+\]
+During relaxed capacity oscillation it is possible to have:
+\[
+\phi(S)=1,\qquad \phi_h(S)=0
+\]
+This means the solution is acceptable only for intermediate exploration.
+It cannot become the final global best.
+This distinction is small in code but important in the logic of the algorithm.
+
+\subsection{Data Loading and Distance Handling}
+
+The code can load supported VRPLIB style instances and CMT XML files.
+For VRPLIB inputs it reads coordinates, demands, vehicle information, depot id and edge-weight type.
+For CMT XML inputs it reads:
+\begin{itemize}
+    \item nodes and coordinates,
+    \item depot definition,
+    \item customer requests,
+    \item vehicle profile.
+\end{itemize}
+The internal depot is always mapped to node $0$.
+The original dataset ids are kept only for output.
+
+There is an important detail about CMT style data.
+Some CMT XML files only contain Euclidean coordinates and a rounding hint, but may not include all classical benchmark restrictions.
+Therefore, benchmark comparison must use the same distance convention and the same constraints.
+If a benchmark value assumes a different rounding rule or a missing route-duration constraint, the result is not directly comparable.
+This is not an algorithmic victory or failure; it is just a data definition issue.
+
+For a coordinate pair $(x_i,y_i)$ and $(x_j,y_j)$, exact Euclidean distance is:
+\[
+d_{ij}^{exact}=\sqrt{(x_i-x_j)^2+(y_i-y_j)^2}
+\]
+TSPLIB EUC\_2D distance is:
+\[
+d_{ij}^{EUC}=\left\lfloor d_{ij}^{exact}+0.5\right\rfloor
+\]
+CEIL\_2D distance is:
+\[
+d_{ij}^{ceil}=\left\lceil d_{ij}^{exact}\right\rceil
+\]
+These values can produce different objective values for the same route.
+So, in the report results section, each dataset must mention the distance rule.
+
+\subsection{Solution State Representation}
+
+The algorithm stores each solution as a structured state:
+\[
+S=(\mathcal{R},\mathcal{V},\mathbf{L},\mathbf{D},\mathbf{T},\mathbf{C},f,\phi,\phi_h)
+\]
+where:
+\[
+\mathcal{R}=(R_1,R_2,\dots,R_m)
+\]
+is the route matrix,
+\[
+\mathcal{V}=(k_1,k_2,\dots,k_m)
+\]
+is the vehicle assignment vector,
+\[
+\mathbf{L}=(L_1,L_2,\dots,L_m)
+\]
+is route load,
+\[
+\mathbf{D}=(D_1,D_2,\dots,D_m)
+\]
+is route distance,
+\[
+\mathbf{T}=(T_1,T_2,\dots,T_m)
+\]
+is route completion time,
+\[
+\mathbf{C}=(C_1,C_2,\dots,C_m)
+\]
+is route cost.
+
+This representation is heavier than a single giant tour.
+But the algorithm needs route-local evaluation, route badness, vehicle reassignment and partial rebuilding.
+For these operations, a plain permutation is not enough.
+
+Every route is normalized:
+\[
+\mathcal{N}(R)=[0]+[i\in R:i\ne 0]+[0]
+\]
+This prevents accidental missing depot markers during evaluation.
+
+\subsection{Route Diagnostic Layer}
+
+BloodhoundTest3 does not evaluate a route only by its length.
+The algorithm also tries to describe the shape and health of each route.
+This diagnostic layer is important because two routes can have similar cost while having very different future improvement potential.
+A compact route with one expensive edge may be easier to repair than a geographically scattered route that looks cheap only because of one lucky connection.
+For this reason, route evaluation contains a geometric and structural interpretation layer.
+
+For a route $R_r$, the customer core is:
+\[
+U_r=R_r\cap V_c
+\]
+The centroid of the route is:
+\[
+c_r=\left(\frac{1}{|U_r|}\sum_{i\in U_r}x_i,\frac{1}{|U_r|}\sum_{i\in U_r}y_i\right)
+\]
+The spread is:
+\[
+S_r=\frac{1}{|U_r|}\sum_{i\in U_r}\|(x_i,y_i)-c_r\|_2
+\]
+A large $S_r$ indicates that the route is geographically dispersed.
+This is not automatically infeasible or bad, but it is a warning signal.
+If a route has high spread and high distance at the same time, it is usually a strong candidate for cleanup or repartition.
+
+The algorithm also computes outlier behavior.
+For customer $i$ in route $r$, an abstract outlier score can be written as:
+\[
+O_{r,i}=
+\lambda_1\|(x_i,y_i)-c_r\|_2
++\lambda_2d_{0i}
+-\lambda_3G(i,U_r)
+\]
+where $G(i,U_r)$ measures how many granular neighbors of customer $i$ are already inside route $r$.
+If a customer is far from the route centroid and has few near-neighbors inside the same route, it is treated as suspicious.
+This allows the algorithm to say something more specific than ``this route is expensive''.
+It can say ``this route may contain a customer that belongs to another route community''.
+
+The route diagnostic layer is then summarized through route badness:
+\[
+\beta_r=\mathcal{B}(D_r,S_r,\{O_{r,i}\}_{i\in U_r},\rho_r)
+\]
+where:
+\[
+\rho_r=\frac{L_r}{Q_{k_r}}
+\]
+is the route utilization ratio.
+This badness value controls later mechanisms such as targeted cleanup, full moon repair, exact two-route repartition and operator reward.
+So the diagnostic layer is not just for reporting.
+It directly changes the search trajectory.
+
+\subsection{Vehicle Type Grouping}
+
+Input vehicles are grouped into vehicle types by:
+\[
+(Q,\gamma,F,u)
+\]
+If two vehicles have the same capacity, variable cost, fixed cost and speed, they belong to the same type.
+The count of such vehicles becomes:
+\[
+m_k
+\]
+This is why a homogeneous fleet is detected when all vehicle types are identical.
+
+For homogeneous fleets, random vehicle reassignment is skipped.
+This was kept in the final version.
+The reason is simple: if every vehicle is identical, random reassignment cannot improve anything.
+It only spends computation and may create noisy behavior.
+For heterogeneous fleets, vehicle reassignment remains active.
+
+\subsection{Route Evaluation}
+
+For a route $R_r$ and vehicle type $k$, route evaluation checks:
+\[
+L_r\le Q_k
+\]
+\[
+t_i\in[a_i,b_i]
+\]
+\[
+T_r\le \overline{T}
+\]
+and computes:
+\[
+C_r=F_k+\gamma_kD_r
+\]
+
+If strategic oscillation is in RELAX mode, the capacity rule is softened:
+\[
+C_r^{relax}=F_k+\gamma_kD_r+\omega\max(0,L_r-Q_k)
+\]
+Time-window violations are not softened.
+This is deliberate.
+Capacity violation can often be repaired by moving load between routes.
+Time-window violation is usually more structural, so the algorithm keeps it hard.
+
+\subsection{Initial Solution Construction}
+
+The initial solution is generated by a constructive insertion method.
+Customers are first ordered.
+The default order is demand-driven:
+$q_i$ descending.
+This puts heavy customers earlier, because delaying them can make insertion harder.
+
+The order is perturbed across attempts.
+This avoids all wolves starting from exactly the same route structure.
+For every customer, the algorithm tries feasible insertion positions and feasible vehicle types.
+The insertion cost is:
+\[
+\delta(i,r,p)=C(R_r\oplus_p i)-C(R_r)
+\]
+where $R_r\oplus_p i$ means inserting customer $i$ at position $p$ of route $r$.
+If no existing route can accept the customer, a new route is opened if the vehicle availability allows it.
+
+This construction is greedy, but not completely deterministic because the attempts can use perturbed customer orders.
+Still, the population can be similar at the beginning.
+This was one of the reasons archive population and genetic injection were added later.
+
+\subsection{Wolf Representation}
+
+Each population member is called a wolf:
+\[
+W_i=(S_i,S_i^{best},B_i,\mathcal{H}_i,q_i)
+\]
+where:
+\[
+S_i
+\]
+is the current solution,
+\[
+S_i^{best}
+\]
+is the personal best hard-feasible solution,
+\[
+B_i
+\]
+is the blood level,
+\[
+\mathcal{H}_i
+\]
+is recent delta history,
+and:
+\[
+q_i
+\]
+is normalized quality.
+
+The personal best is updated only by hard-feasible states.
+This prevents RELAX-mode infeasible states from becoming elite references.
+
+\subsection{Blood Mechanism}
+
+Blood is an exploration budget.
+It allows a wolf to accept some worsening moves, but not endlessly.
+The motivation is similar to simulated annealing, but the behavior is not exactly the same.
+In simulated annealing, the probability of accepting a worse move is mostly controlled by a global temperature schedule.
+In BloodhoundTest3, each wolf has its own exploration budget.
+Therefore, two wolves can behave differently even in the same hunt.
+One wolf may become conservative because it has already spent its blood, while another wolf may still be able to cross a local barrier.
+This creates a small asymmetry inside the population, and that asymmetry is useful because the wolves do not all freeze at the same time.
+
+For a candidate $S'$ and current state $S$:
+\[
+\Delta=f(S')-f(S)
+\]
+If:
+\[
+\Delta<0
+\]
+the move is improving and can be accepted directly.
+If:
+\[
+\Delta>0
+\]
+the move is worsening and must pass the blood acceptance rule.
+
+The raw delta is scaled by recent movement history:
+\[
+\widehat{\Delta}=\frac{\Delta}{\sigma_\Delta+\epsilon}
+\]
+The scale is lower bounded:
+\[
+\sigma_\Delta\ge \max(\epsilon_{abs},\epsilon_{rel}|f(S)|)
+\]
+This prevents a tiny recent-delta history from making every small worsening move look huge.
+
+If the candidate is similar to closed regions, a memory penalty is added:
+\[
+\widetilde{\Delta}=\widehat{\Delta}+\lambda\cdot \text{sim}(E(S'),\mathcal{M})
+\]
+The similarity term makes the move worse if it returns to already known structural regions.
+Thus, the effective worsening is not only cost-based:
+\[
+\widetilde{\Delta}
+=
+\underbrace{\frac{f(S')-f(S)}{\sigma_\Delta+\epsilon}}_{\text{scaled cost change}}
++
+\underbrace{\lambda\cdot \text{sim}(E(S'),\mathcal{M})}_{\text{region repetition penalty}}
+\]
+Then the acceptance probability can be described as:
+\[
+P_{acc}=\exp(-a\widetilde{\Delta})
+\]
+The move is accepted only if:
+\[
+U(0,1)<P_{acc}
+\]
+and the wolf has enough blood.
+
+The blood consumption is proportional to the worsening move.
+The idea is not to randomly jump everywhere.
+It is to allow controlled short-term damage when the search needs to leave a narrow basin.
+If the blood payment is denoted by $\kappa(\widetilde{\Delta})$, a simple conceptual condition is:
+\[
+B_i\ge \kappa(\widetilde{\Delta})
+\]
+and after acceptance:
+\[
+B_i\leftarrow B_i-\kappa(\widetilde{\Delta})
+\]
+For improving moves, blood can be partially recovered:
+\[
+B_i\leftarrow B_i+\eta|\Delta|
+\]
+This gives productive wolves more exploration ability.
+So the blood mechanism is not only a random acceptance trick.
+It is also a feedback mechanism between past improvement and future risk capacity.
+
+\subsection{Strategic Oscillation}
+
+Strategic oscillation alternates between:
+\[
+\psi=\text{ENFORCE}
+\]
+and:
+\[
+\psi=\text{RELAX}
+\]
+The controller uses two periods:
+\[
+T_E
+\]
+for enforce and:
+\[
+T_R
+\]
+for relax.
+
+The phase transition is:
+\[
+\psi_{t+1}=
+\begin{cases}
+\text{RELAX}, & \psi_t=\text{ENFORCE}\ \text{and enforce period ends}\\
+\text{ENFORCE}, & \psi_t=\text{RELAX}\ \text{and relax period ends}\\
+\psi_t, & \text{otherwise}
+\end{cases}
+\]
+
+In ENFORCE:
+\[
+\phi(S)=\phi_h(S)
+\]
+In RELAX:
+\[
+\phi(S)=1
+\]
+may hold even if:
+\[
+\phi_h(S)=0
+\]
+because capacity excess is penalized instead of immediately rejected.
+
+This is useful for constrained heterogeneous problems.
+Some good route structures are only reachable by temporarily overloading a route and repairing it later.
+If every intermediate overload is rejected, the algorithm can become too conservative.
+
+\subsection{Region Memory}
+
+The algorithm stores edge signatures of selected high-quality states:
+\[
+\mathcal{M}=\{E(S_1),E(S_2),\dots,E(S_z)\}
+\]
+The similarity of two solutions is measured by edge overlap:
+\[
+\text{sim}(S_a,S_b)=\frac{|E(S_a)\cap E(S_b)|}{\max(1,|E(S_a)|)}
+\]
+This is not a perfect distance metric, but it is fast and useful.
+If two solutions use almost the same edges, they are treated as members of a similar search region.
+
+The memory is used in two ways.
+First, it penalizes revisiting closed regions during acceptance.
+Second, it helps elite and archive diversity filtering.
+This prevents the algorithm from storing ten copies of the same solution family.
+
+\subsection{Population Quality and Alpha Selection}
+
+Wolf quality is normalized from costs.
+Lower cost means higher quality.
+For costs $c_i$, a simple min-max quality idea is:
+\[
+Q_i=1-\frac{c_i-c_{min}}{c_{max}-c_{min}+\epsilon}
+\]
+The alpha score combines current cost quality, blood and historical quality:
+\[
+A_i=w_cQ_i+w_b\overline{B}_i+w_hQ_i^{best}+w_nN_i
+\]
+where:
+\[
+w_c=0.72,\quad w_b=0.08,\quad w_h=0.20
+\]
+in the current configuration.
+The novelty term is increased during plateau:
+\[
+w_n=p_h\cdot w_{novelty}
+\]
+where $p_h$ is plateau level.
+
+Earlier versions relied too much on cost.
+That created fast convergence to one solution family.
+The novelty term and archive guide were added to keep different promising regions alive.
+
+\subsection{Elite Pool}
+
+The elite pool stores a small number of high-quality hard-feasible states.
+It has a maximum size:
+\[
+|\mathcal{E}|\le E_{max}
+\]
+and a similarity threshold:
+\[
+\text{sim}(S_a,S_b)<\theta_E
+\]
+The current configuration uses a small elite pool.
+This is intentional because elite states are guides, not a second full population.
+
+If an incoming state is very similar to an existing elite and worse, it is not useful.
+If it is different enough, it may be stored even if it is not the absolute best.
+This is because route structure diversity has value in later crossover and path relinking.
+
+\subsection{Artificial Population Archive}
+
+The artificial population archive is larger than the elite pool.
+It stores good and diverse hard-feasible states:
+\[
+\mathcal{A}=\{S_1,S_2,\dots,S_A\}
+\]
+with:
+\[
+|\mathcal{A}|\le A_{max}
+\]
+The current maximum archive size is:
+\[
+A_{max}=16
+\]
+and the similarity cap is:
+\[
+\theta_A=0.90
+\]
+
+The archive is not passive.
+It is used for:
+\begin{itemize}
+    \item guide selection,
+    \item pack crossover parent selection,
+    \item pulse micro-HGS parent pool construction,
+    \item diverse offspring injection.
+\end{itemize}
+
+This is one of the major changes from the old version.
+The algorithm no longer only has wolves and a small elite list.
+It has a small ecosystem of stored solution structures.
+This part is important even though it is less visible than local search, because it determines which solution families remain available for later recombination.
+
+\subsection{Archive Injection}
+
+Archive offspring are periodically generated.
+An archive child can be injected into weak wolves if it is both good and novel.
+The cost slack rule is:
+\[
+f(child)\le f(best)\cdot(1+\epsilon_A)
+\]
+where:
+\[
+\epsilon_A=0.10
+\]
+in the current configuration.
+The novelty rule is:
+\[
+N(child)\ge N_{min}
+\]
+where:
+\[
+N_{min}=0.14
+\]
+This prevents bad random children from entering the population.
+It also prevents the archive from injecting near-duplicates.
+
+\subsection{Free Search Phase}
+
+At the start of each hunt, all wolves receive reserve blood.
+The algorithm then activates strategic oscillation.
+During free search, each wolf samples neighborhood moves and uses blood acceptance.
+
+The basic random neighbors include:
+\begin{itemize}
+    \item intra-route 2-opt,
+    \item inter-route relocate,
+    \item safe inter-route relocate,
+    \item 2-opt* between routes,
+    \item vehicle reassignment.
+\end{itemize}
+Vehicle reassignment is skipped for homogeneous fleets.
+
+Free search is not the most powerful part of the algorithm.
+It mainly prepares diverse states before the hunt stage.
+It also lets wolves collect or spend blood.
+
+\subsection{Adaptive Local Search Profiles}
+
+The algorithm uses different local-search limits depending on problem scale.
+It has dense, medium and light profiles.
+The selection depends on route count and route density:
+\[
+\text{density}=\frac{|V_c|}{m}
+\]
+If the problem has few routes or high customers-per-route density, it uses the dense profile.
+Otherwise it uses medium or light.
+
+The profiles control:
+\begin{itemize}
+    \item number of intra-route candidates,
+    \item number of relocate route pairs,
+    \item number of 2-opt* route pairs,
+    \item cross-exchange trials,
+    \item or-opt trials,
+    \item path-search customer count,
+    \item local-search rounds.
+\end{itemize}
+
+During pulse or plateau, these limits are modified.
+For pulse:
+\[
+\text{pair limits}'=\mu_{pulse}\cdot\text{pair limits}
+\]
+For plateau:
+\[
+\text{route operators}'=\mu_{route}^{p_h}\cdot \text{route operators}
+\]
+\[
+\text{intra operators}'=\mu_{intra}^{p_h}\cdot \text{intra operators}
+\]
+This shifts effort toward structural moves when the search is stuck.
+
+\subsection{Best-Improving Local Search Operators}
+
+The deterministic local search phase uses a sequence of best-improving operators.
+The important operators are:
+\begin{itemize}
+    \item best intra-route 2-opt,
+    \item best inter-route relocate,
+    \item best outlier relocate,
+    \item best two-customer relocate,
+    \item best inter-route 2-opt*,
+    \item best cross exchange,
+    \item best or-opt.
+\end{itemize}
+
+For intra-route 2-opt, the route segment is reversed:
+\[
+(...,a,\underline{i,\dots,j},b,...)
+\rightarrow
+(...,a,\underline{j,\dots,i},b,...)
+\]
+The delta is:
+\[
+\Delta=d_{a,j}+d_{i,b}-d_{a,i}-d_{j,b}
+\]
+
+For relocate, customer $i$ is removed from route $R_a$ and inserted into route $R_b$:
+\[
+R_a\setminus\{i\},\quad R_b\oplus i
+\]
+The move must keep both routes feasible.
+
+For 2-opt*, two routes exchange tails.
+For cross exchange, two route segments are exchanged.
+For or-opt, a small chain of consecutive customers is moved.
+
+The local search does not scan the full enormous neighborhood every time.
+It uses candidate route selection based on centroids and granular neighborhoods.
+This matters for runtime.
+
+\subsection{Granular Neighborhoods}
+
+Each customer stores a list of nearest granular neighbors:
+\[
+\mathcal{N}_g(i)=\text{nearest }k\text{ customers to }i
+\]
+The current configuration uses:
+\[
+k=18
+\]
+Granular information is used for route selection, outlier detection and insertion scoring.
+
+If two routes have many customers close to each other, they are more promising for exchange.
+The algorithm does not waste equal effort on two geographically unrelated routes.
+This is a very practical detail because it avoids spending equal effort on route pairs that are unlikely to interact.
+
+\subsection{Route Centroid and Spread}
+
+The centroid of route $R_r$ is:
+\[
+c_r=\frac{1}{|R_r\cap V_c|}\sum_{i\in R_r\cap V_c}(x_i,y_i)
+\]
+Route spread is approximately:
+\[
+S_r=\frac{1}{|R_r\cap V_c|}\sum_{i\in R_r\cap V_c}\|(x_i,y_i)-c_r\|
+\]
+Large spread may indicate a scattered route.
+This is not always bad, but it is suspicious.
+
+Route-pair selection uses centroid distance:
+\[
+d_c(R_a,R_b)=\|c_a-c_b\|_2
+\]
+Nearby routes are more likely to produce useful exchanges.
+
+\subsection{Customer Outlier Score}
+
+A customer can be an outlier inside its own route.
+The code scores customer outlierness using geometric distance, route relation and granular overlap.
+A simplified expression is:
+\[
+O_{r,i}=\alpha_1\|(x_i,y_i)-c_r\|+\alpha_2d_{depot,i}-\alpha_3g(i,R_r)
+\]
+where $g(i,R_r)$ measures how many granular neighbors of $i$ are inside the route.
+
+If a customer has low granular overlap with its route and is far from route centroid, it becomes an outlier candidate.
+Outlier relocation and cleanup operators use this.
+This is one reason the algorithm can repair route geometry instead of only optimizing edge length.
+
+\subsection{Route Badness}
+
+Route badness combines several symptoms.
+A simplified formula is:
+\[
+\beta_r=
+\alpha_D\frac{D_r-\overline{D}}{\sigma_D+\epsilon}
++\alpha_S\frac{S_r-\overline{S}}{\sigma_S+\epsilon}
++\alpha_OO_r
++\alpha_U(1-\rho_r)
+\]
+where:
+\[
+\rho_r=\frac{L_r}{Q_{k_r}}
+\]
+is utilization.
+
+The implementation uses route distance, spread, outlier information and other route-level signals.
+Badness is used by:
+\begin{itemize}
+    \item targeted cleanup,
+    \item full moon repair,
+    \item exact two-route repartition,
+    \item operator reward calculation,
+    \item stagnation recovery.
+\end{itemize}
+
+So route badness is not just diagnostic text.
+It actively controls the search.
+More formally, the algorithm uses badness as an approximation of future repair difficulty.
+Let $H(S)$ denote the structural health of a solution.
+Instead of defining it positively, BloodhoundTest3 estimates the negative side:
+\[
+H(S)\approx -\max_{r}\beta_r
+\]
+or sometimes:
+\[
+H(S)\approx -\frac{1}{|\mathcal{R}|}\sum_{r\in\mathcal{R}}\beta_r
+\]
+The maximum version focuses on the worst route, while the average version describes general route quality.
+The worst-route view is useful for targeted repair because one extremely bad route can block a solution from improving.
+The average view is useful for comparing overall structural balance.
+
+This is why some candidate comparisons use both cost and badness:
+\[
+S'\succ S
+\quad \text{if}\quad
+f(S')<f(S)
+\]
+or:
+\[
+S'\succ S
+\quad \text{if}\quad
+f(S')\le f(S)+\epsilon_c
+\quad \land \quad
+\beta_{\max}(S')<\beta_{\max}(S)-\epsilon_\beta
+\]
+This rule is intentionally asymmetric.
+A small cost increase may be accepted for cleanup, but a large cost increase is not accepted only because the route looks nicer.
+The route structure must improve enough to justify the temporary cost.
+
+\subsection{Plateau Detection}
+
+The algorithm has a stagnation counter:
+\[
+s_h
+\]
+It no longer resets fully for very tiny improvements.
+This was an important correction.
+
+The improvement is classified by:
+\[
+\Delta f=f_{old}-f_{new}
+\]
+Strong improvement:
+\[
+\Delta f\ge \epsilon_{abs}
+\quad \text{or}\quad
+\frac{\Delta f}{f_{old}}\ge \epsilon_{rel}
+\]
+Soft improvement:
+\[
+\Delta f\ge \epsilon_{soft,abs}
+\quad \text{or}\quad
+\frac{\Delta f}{f_{old}}\ge \epsilon_{soft,rel}
+\]
+Only strong improvement resets stagnation to zero.
+Soft improvement only decreases the counter slightly.
+
+The plateau level is:
+\[
+p_h=\min\left(p_{max},\left\lfloor\frac{s_h}{s_{step}}\right\rfloor\right)
+\]
+Current configuration:
+\[
+s_{step}=2,\qquad p_{max}=3
+\]
+
+Plateau level changes ruin fraction:
+\[
+\rho'=\min(\rho_{cap},\rho\cdot \mu_\rho^{p_h})
+\]
+and hunt chain passes:
+\[
+H_{chain}'=H_{chain}+p_h\cdot b_{chain}
+\]
+It also makes acceptance a bit more tolerant:
+\[
+a'=a\cdot \mu_a^{p_h}
+\]
+\[
+c'=c\cdot \mu_c^{p_h}
+\]
+This is done because plateau needs bolder structural moves.
+
+\subsection{Ruin-and-Rebuild}
+
+Ruin-and-rebuild removes customers from a solution and inserts them again.
+The removed set is:
+\[
+D\subset V_c
+\]
+The remaining partial solution is repaired by regret insertion.
+
+Destroy modes are:
+\begin{itemize}
+    \item Shaw destroy,
+    \item worst-customer destroy,
+    \item targeted route-neighborhood destroy,
+    \item route-level destroy.
+\end{itemize}
+
+Shaw destroy removes related customers.
+Relatedness can be described as:
+\[
+rel(i,j)=\alpha_dd_{ij}+\alpha_q|q_i-q_j|+\alpha_rI(route(i)\ne route(j))
+\]
+Lower relatedness means customers are more similar.
+
+Worst destroy removes expensive or structurally bad customers.
+Targeted destroy focuses around bad routes and their neighbors.
+Route destroy removes larger route sections.
+
+\subsection{Regret Repair}
+
+For a removed customer $i$, the algorithm computes possible insertions.
+Let the sorted insertion costs be:
+\[
+\delta_{i,1}\le \delta_{i,2}\le \dots \le \delta_{i,k}
+\]
+Regret-$k$ is:
+\[
+Reg_k(i)=\sum_{j=2}^{k}(\delta_{i,j}-\delta_{i,1})
+\]
+The customer with high regret is inserted earlier.
+The idea is that if the best insertion for a customer is much better than the second best, postponing it is risky.
+
+The algorithm samples regret-2 or regret-3:
+\[
+k=
+\begin{cases}
+3,& \text{with probability }p_3\\
+2,& \text{otherwise}
+\end{cases}
+\]
+Current:
+\[
+p_3=0.35
+\]
+
+Insertion scoring is not only raw cost.
+It includes centroid penalty, outlier penalty and load pressure.
+One simplified score is:
+\[
+score=\delta+\lambda_ccentroid+\lambda_ooutlier+\lambda_l loadPenalty
+\]
+This helps avoid insertions that are cheap immediately but geometrically strange.
+
+\subsection{Destroy Bandit}
+
+Destroy mode selection uses a bandit.
+Each mode $m$ has a score:
+\[
+v_m
+\]
+Scores are initialized by priors.
+The current priors are higher for targeted destroy because route pathology was important in experiments.
+
+After a destroy-repair attempt, reward is calculated.
+If the candidate improves global best, reward is high:
+\[
+R_m=R_{global}+\Delta f
+\]
+If it only improves the current solution:
+\[
+R_m=R_{improve}+0.5\Delta f
+\]
+If it produces a feasible but not improving state:
+\[
+R_m=R_{feasible}
+\]
+Failure gives small reward.
+
+The update rule is:
+\[
+v_m\leftarrow (1-\alpha)v_m+\alpha R_m
+\]
+The bandit also adds pathology bias.
+If the current state has route pathology, targeted and route modes become more attractive.
+This is ALNS-like, but adapted to the Bloodhound search loop.
+
+\subsection{Hunt Operator Bandit}
+
+The final version also has a second bandit for larger hunt operators:
+\[
+\mathcal{O}=\{\text{pack},\text{ejection},\text{merge},\text{route\_pool},\text{fallback}\}
+\]
+This controls which high-level mechanism is tried inside alpha hunting.
+This is necessary because the best operator changes during the search.
+At the beginning, pack crossover or ordinary rebuild may quickly improve poor solutions.
+Near a plateau, ejection chains or route-pool recombination may become more useful.
+If all operators were called with fixed frequency, the algorithm would waste time on weak operators in the current phase.
+The operator bandit is a lightweight way of adapting the search without designing a separate schedule for every instance.
+
+Operator reward includes:
+\begin{itemize}
+    \item $\Delta f$: cost improvement,
+    \item $\Delta \beta$: route badness reduction,
+    \item $\Delta m$: route-count improvement when relevant.
+\end{itemize}
+
+A simplified reward is:
+\[
+R_o=w_f\max(0,\Delta f)+w_\beta\max(0,\Delta\beta)+w_m\max(0,\Delta m)
+\]
+This is why an operator may get credit even when it mainly repairs structure.
+That was one of the changes added after seeing that cost-only logic was too short-sighted.
+The score update is:
+\[
+v_o^{(t+1)}=(1-\alpha_o)v_o^{(t)}+\alpha_oR_o^{(t)}
+\]
+The selection rule can be represented as:
+\[
+o_t=
+\begin{cases}
+\text{Uniform}(\mathcal{O}), & \text{with probability }\epsilon_o\\
+\arg\max_{o\in\mathcal{O}}v_o, & \text{otherwise}
+\end{cases}
+\]
+This keeps a small amount of exploration.
+Even an operator with low recent score can still be tested sometimes, because its usefulness may return after the population moves to a different region.
+
+\subsection{Targeted Cleanup}
+
+Targeted cleanup is a cascade of corrective operators.
+It is not always called.
+The probability is:
+\[
+p_{cleanup}
+\]
+and it increases during pulse or plateau:
+\[
+p'=\min(1,p_{cleanup}+p_h\cdot b_{cleanup})
+\]
+
+The cleanup cascade includes:
+\begin{itemize}
+    \item micro-LNS,
+    \item focused cluster rebuild,
+    \item worst-route outlier purge,
+    \item worst-route shatter,
+    \item route surgery.
+\end{itemize}
+
+The candidate comparison is not pure cost.
+Let:
+\[
+\beta^{max}(S)=\max_r \beta_r
+\]
+A cleanup candidate can be accepted if:
+\[
+f(S')<f(S)
+\]
+or if:
+\[
+f(S')\le f(S)+\epsilon_c
+\]
+and:
+\[
+\beta^{max}(S')+\epsilon_\beta<\beta^{max}(S)
+\]
+This means bounded short-term cost increase is allowed if route structure becomes much healthier.
+This mechanism is kept in the current code.
+It is very important for structural repair.
+
+\subsection{Micro-LNS}
+
+Micro-LNS selects a small group of suspicious routes and neighboring routes.
+It removes their customers:
+\[
+P=\bigcup_{r\in R_{selected}}R_r\cap V_c
+\]
+Then it rebuilds only this pool.
+This is cheaper than applying a large destroy to the whole solution.
+It is used when only a local route community is broken.
+
+\subsection{Focused Cluster Rebuild}
+
+Focused cluster rebuild chooses bad routes and nearby routes.
+It then tries several customer orderings:
+\[
+\pi_1,\pi_2,\dots,\pi_a
+\]
+and rebuilds the customer pool.
+Orderings may be based on farthest seeds, centroid structure or guide routes.
+
+This operator tries to repair a local region.
+It is more structural than relocate but cheaper than restarting a solution.
+
+\subsection{Worst Route Shatter}
+
+Worst-route shatter takes one or more bad routes and breaks them apart.
+The customers are then reinserted or rebuilt.
+This is used when a route is internally too messy.
+It is more aggressive than outlier purge.
+Outlier purge removes a few suspicious customers.
+Shatter assumes the route itself is not reliable.
+
+\subsection{Route Surgery}
+
+Route surgery selects target bad routes and neighboring routes.
+It tries to reconstruct a small route community.
+The idea is similar to surgical repair:
+do not destroy the whole solution, only cut the part that looks wrong.
+
+This operator is useful when the bad route shares boundary mistakes with nearby routes.
+For example, two routes may both be individually feasible but have customers assigned to the wrong cluster.
+
+\subsection{Route Elimination}
+
+Route elimination tries to remove weakly utilized routes.
+For route $r$:
+\[
+\rho_r=\frac{L_r}{Q_{k_r}}
+\]
+Low $\rho_r$ indicates weak utilization.
+A route elimination candidate removes that route and tries to reinsert its customers into other routes.
+
+The objective may improve because route count decreases and fixed or distance costs are reduced.
+However, this operator is not allowed to break feasibility.
+It is mainly useful when the solution has extra routes above the lower bound:
+\[
+m_{LB}=\left\lceil\frac{\sum_i q_i}{Q_{max}}\right\rceil
+\]
+
+\subsection{Route Count Pressure}
+
+The algorithm uses adaptive route-count pressure during comparisons.
+The lower bound is:
+\[
+m_{LB}=\left\lceil\frac{\sum_iq_i}{Q_{max}}\right\rceil
+\]
+The excess route count is:
+\[
+e_m=\max(0,m(S)-m_{LB})
+\]
+The pressure penalty is:
+\[
+P_m(S)=\lambda_m e_m^\alpha
+\]
+and pressured cost is:
+\[
+f_p(S)=f(S)+P_m(S)
+\]
+This is not the final reported objective.
+It is a guidance function.
+It pushes the search away from route-heavy solutions when route count is structurally suspicious.
+
+\subsection{Alpha-Guided Rebuild}
+
+Alpha-guided rebuild moves a wolf toward a guide solution.
+The guide can be:
+\begin{itemize}
+    \item the alpha state,
+    \item an elite state,
+    \item an archive state.
+\end{itemize}
+
+The algorithm selects some routes from the guide to inherit:
+\[
+I\subset \mathcal{R}_{guide}
+\]
+The inherited fraction is:
+\[
+\rho_h
+\]
+Customers covered by inherited routes are fixed temporarily.
+The remaining customers are rebuilt by insertion.
+
+This is not a direct copy of the alpha.
+Direct copying would collapse the population.
+Instead, partial inheritance preserves useful structure while allowing the follower wolf to keep some independence.
+
+\subsection{Elite Path Relinking}
+
+Path relinking tries to move the current solution toward a guide solution by relocating selected customers.
+It identifies customers whose route assignment differs between states.
+Then it applies guided relocations.
+
+If:
+\[
+route_S(i)\ne route_G(i)
+\]
+then customer $i$ may be selected for relinking.
+The move tries to place $i$ closer to its guide structure without breaking feasibility.
+
+This operator is a bridge between local search and crossover.
+It does not create a child from scratch.
+It gradually moves one state toward another.
+
+\subsection{Merge and Repartition}
+
+Merge-and-repartition selects a small customer pool from multiple routes.
+It merges the pool:
+\[
+P=\bigcup R_r
+\]
+and repartitions it using rebuild logic.
+This operator is useful when route boundaries are bad.
+It is weaker than exact repartition but cheaper for larger pools.
+
+\subsection{Full Moon Phase}
+
+Full moon is the main structural intensification phase.
+It is applied after hunt around alpha.
+It selects the worst routes:
+\[
+R_{bad}=\arg\max \beta_r
+\]
+and nearby routes by centroid distance.
+
+The selected customer pool is:
+\[
+P=\bigcup_{r\in R_{bad}\cup N(R_{bad})}R_r\cap V_c
+\]
+The current version of full moon uses several reconstruction mechanisms:
+\begin{itemize}
+    \item customer-pool split rebuild,
+    \item pack-trail ordering,
+    \item route-pool set partitioning,
+    \item targeted cleanup,
+    \item local intensification.
+\end{itemize}
+
+Earlier versions mostly rebuilt bad routes.
+The current version is stronger because it can use elite/global pack states and giant tours.
+
+\subsection{Giant-Tour View}
+
+Although the solution is stored as a route matrix, several operators convert it to a giant tour.
+For a solution $S$:
+\[
+\pi(S)=(i_1,i_2,\dots,i_n)
+\]
+where every customer appears once.
+
+The giant tour is useful for crossover.
+It lets the algorithm recombine customer order first and let the split decoder decide route boundaries later.
+This is closer to Hybrid Genetic Search style.
+
+The key point is:
+\[
+\text{route matrix}\rightarrow\text{giant tour}\rightarrow\text{split decode}
+\]
+not:
+\[
+\text{route matrix}\rightarrow\text{copy routes only}
+\]
+This change was made because copying whole routes can preserve bad route boundaries.
+
+\subsection{Split Decoder}
+
+Given a giant tour:
+\[
+\pi=(\pi_1,\pi_2,\dots,\pi_n)
+\]
+the split decoder creates routes by cutting the sequence into segments.
+This decoder is one of the key mechanisms that connects the genetic part of the algorithm to the route-matrix representation.
+The genetic operator works more naturally on customer orders, while the routing problem is evaluated as a set of routes.
+The split decoder is the bridge between these two representations.
+It decides where one vehicle route should end and the next route should begin.
+This is important because a good giant tour can still be a bad solution if it is split at poor positions.
+
+A segment is:
+\[
+R(i,j)=(0,\pi_i,\pi_{i+1},\dots,\pi_j,0)
+\]
+For each segment, the algorithm finds the best feasible vehicle type:
+\[
+g(i,j)=\min_{k\in\mathcal{K}}\left(F_k+\gamma_kD(R(i,j))\right)
+\]
+subject to:
+\[
+\sum_{t=i}^{j}q_{\pi_t}\le Q_k
+\]
+and time feasibility if active.
+
+The split dynamic programming recurrence is:
+\[
+DP[j]=\min_{i\le j}\{DP[i-1]+g(i,j)\}
+\]
+with:
+\[
+DP[0]=0
+\]
+The predecessor index is also stored:
+\[
+Pred[j]=\arg\min_{i\le j}\{DP[i-1]+g(i,j)\}
+\]
+After the dynamic program is completed, the route decomposition is reconstructed by following:
+\[
+j\leftarrow Pred[j]-1
+\]
+backwards until the beginning of the tour is reached.
+
+The decoder can also try different target route counts.
+This helps when the cheapest pure split creates too many or too few routes.
+If $m$ is the allowed or preferred route count, a route-count constrained version can be written as:
+\[
+DP[h,j]=\min_{i\le j}\{DP[h-1,i-1]+g(i,j)\}
+\]
+where $h$ is the number of routes used.
+The final solution is then selected from:
+\[
+\min_{h\in\mathcal{H}}DP[h,n]
+\]
+where $\mathcal{H}$ is a small range around the current or desired route count.
+
+For heterogeneous fleets the split evaluator is vehicle-aware.
+It is not a perfect full vehicle-count DP in every situation, but it checks feasible vehicle assignments and route costs.
+This is a practical compromise.
+Full exact split with vehicle inventory can become expensive.
+In other words, the decoder is exact with respect to cutting a fixed order under the evaluated segment costs, but the overall metaheuristic remains heuristic because the giant tour itself is generated by search.
+
+\subsection{Pack Trail Construction}
+
+Pack trails are generated from route fragments and parent states.
+A pack trail is a customer ordering:
+\[
+\pi_{pack}
+\]
+It can be created from:
+\begin{itemize}
+    \item current bad-route customer pool,
+    \item elite routes,
+    \item archive routes,
+    \item global-best routes,
+    \item radial ordering around the depot,
+    \item randomized completion.
+\end{itemize}
+
+The trail is completed so that every customer in the pool appears exactly once:
+\[
+\pi_{complete}=\text{CompleteTrail}(P,\pi_{partial})
+\]
+Then it is split-decoded.
+
+\subsection{Pack Crossover}
+
+Pack crossover selects multiple parent states:
+\[
+P_1,P_2,\dots,P_k
+\]
+The parent count is capped:
+\[
+k\le k_{pack}
+\]
+Current:
+\[
+k_{pack}=3
+\]
+
+It builds giant-tour orderings from parent route structures.
+Then it decodes those orderings by split.
+The child is:
+\[
+S_{child}=\text{SplitDecode}(\pi_{child})
+\]
+After crossover, the child is polished by stronger local search:
+\[
+S_{child}'=\text{StrongEjectionLS}(S_{child})
+\]
+
+This is not a classical random crossover only.
+It is a route-structure recombination operator.
+It tries to combine good substructures from parents while still allowing new route boundaries.
+
+\subsection{Route Pool}
+
+The route pool stores good routes from several states.
+A route pool entry has:
+\[
+(R,c(R),cover(R),k_R)
+\]
+where $cover(R)$ is the customer set.
+
+The ideal set partitioning problem is:
+\[
+\min \sum_{r\in\mathcal{P}}c_rx_r
+\]
+subject to:
+\[
+\sum_{r\in\mathcal{P}}A_{ir}x_r=1 \qquad \forall i\in V_c
+\]
+\[
+x_r\in\{0,1\}
+\]
+where:
+\[
+A_{ir}=1
+\]
+if route $r$ covers customer $i$.
+
+The implementation does not solve a large exact set partitioning problem every time.
+Instead, it builds a capped route pool and tries selected reconstruction orderings.
+This keeps runtime under control.
+Still, the mechanism is powerful because it can combine routes from different good solutions.
+Local search cannot easily do that.
+
+\subsection{Pulse Micro-HGS}
+
+Every pulse interval, the algorithm can run a short micro Hybrid Genetic Search phase.
+The pulse interval is:
+\[
+H_{pulse}=3
+\]
+in the current configuration.
+This phase should not be understood as a separate genetic algorithm that replaces the wolves.
+It is a short auxiliary evolutionary process.
+Its purpose is to use the artificial archive more actively and produce a few high-quality diverse candidates.
+The main population remains the Bloodhound wolf population.
+The micro-HGS only injects selected children back into this population.
+
+The micro-HGS parent pool is built from:
+\[
+\mathcal{A}\cup \mathcal{E}\cup \{S^*\}\cup \{S_i^{best}\}
+\]
+where $\mathcal{A}$ is archive, $\mathcal{E}$ is elite pool and $S^*$ is global best.
+
+Parent selection uses tournament selection.
+For tournament size $t$:
+\[
+parent=\arg\min_{S\in T} f(S)
+\]
+with diversity filtering already handled in the pool.
+If the tournament set is:
+\[
+T=\{S_{a_1},S_{a_2},\dots,S_{a_t}\}
+\]
+then the selected parent is:
+\[
+S_p=\arg\min_{S\in T} f_p(S)
+\]
+where $f_p$ may include route-count pressure during plateau.
+This makes the genetic step consistent with the rest of the search.
+
+The crossover is order-based.
+It is similar to OX:
+\[
+\pi_c=\text{OX}(\pi_a,\pi_b)
+\]
+A slice from one parent is preserved.
+The remaining customers are filled from the other parent in order.
+Duplicates are not allowed.
+If the copied slice from parent $a$ is:
+\[
+\pi_a[l:r]
+\]
+then the child keeps:
+\[
+\pi_c[l:r]=\pi_a[l:r]
+\]
+The remaining positions are filled by scanning $\pi_b$ and skipping customers already used:
+\[
+\pi_c=\pi_a[l:r]\cup \{i\in \pi_b: i\notin \pi_a[l:r]\}
+\]
+This preserves a contiguous structure from one parent and ordering information from the other parent.
+
+Mutation probability decreases by generation:
+\[
+p_{mut}(g)=p_{end}+(p_{start}-p_{end})\left(1-\frac{g}{G-1}\right)
+\]
+Current values:
+\[
+p_{start}=0.70
+\]
+\[
+p_{end}=0.08
+\]
+This means early generations explore more and later generations become more exploitative.
+
+Each child is decoded by split:
+\[
+S_c=\text{DecodeMicroHGS}(\pi_c)
+\]
+The decoder tries several route-count variants.
+Then the best children are polished.
+Only a limited number of children are injected into wolves:
+\[
+n_{inject}=2
+\]
+This is why population size does not explode.
+The genetic phase influences wolves through selective replacement and archive update.
+The survivor logic is elitist but not purely cost-greedy.
+The temporary parent pool is updated as:
+\[
+\mathcal{P}_{g+1}=\text{SelectDiverseBest}(\mathcal{P}_g\cup \mathcal{C}_g)
+\]
+where $\mathcal{C}_g$ is the child set of generation $g$.
+This means a child can survive if it is strong enough, but the pool is still filtered for similarity.
+This was added because a pure cost-only genetic pool quickly becomes a set of almost identical tours.
+
+\subsection{Exact Intra-Route TSP Polish}
+
+The algorithm has a small exact TSP polish for individual routes.
+It is applied only if:
+\[
+|R_r\cap V_c|\le n_{TSP}
+\]
+Current:
+\[
+n_{TSP}=12
+\]
+
+For customer set $U$, it solves:
+\[
+\min_{\pi\in Perm(U)}
+d_{0,\pi_1}+\sum_{t=1}^{|U|-1}d_{\pi_t,\pi_{t+1}}+d_{\pi_{|U|},0}
+\]
+The dynamic programming recurrence is Held-Karp style:
+\[
+HK(M,j)=\min_{i\in M\setminus\{j\}}\{HK(M\setminus\{j\},i)+d_{ij}\}
+\]
+The final route is reconstructed from predecessor masks.
+
+This is exact inside one route.
+It is not exact for the whole VRP.
+The cap keeps the runtime small.
+The reason for using this operator is practical.
+Many routes in VRP solutions contain a small number of customers.
+For such routes, there is no need to rely only on heuristic 2-opt moves.
+The route order can be optimized exactly with very limited cost.
+After this step, if the route is still bad, the problem is usually not the internal ordering of that route.
+It is more likely a route assignment or route-boundary problem.
+So exact route polish also helps diagnose where the remaining error is coming from.
+
+\subsection{Small Exact Customer Pool}
+
+For very small customer pools, the algorithm can solve a partitioning subproblem.
+The customer cap is:
+\[
+n_{pool}=12
+\]
+The pool is:
+\[
+P\subset V_c
+\]
+The algorithm tries to build one or more feasible routes from this pool.
+This is useful in full moon and route community rebuilds.
+
+The point is to place exact search where it is cheap.
+Applying exact search to the full solution would be impossible for large instances.
+But applying it to 10 or 12 customers can be very effective.
+
+\subsection{Exact Two-Route Repartition}
+
+Exact two-route repartition selects one bad route and one related neighbor route.
+The customer pool is:
+\[
+P=(R_a\cup R_b)\cap V_c
+\]
+If:
+\[
+|P|\le n_{2route}
+\]
+where current:
+\[
+n_{2route}=14
+\]
+then it tries to partition $P$ into two feasible routes.
+
+The subproblem can be written as:
+\[
+\min_{A\subset P}\{C(A)+C(P\setminus A)\}
+\]
+subject to:
+\[
+A\ne \emptyset
+\]
+\[
+P\setminus A\ne \emptyset
+\]
+\[
+L(A)\le Q_{k_a}
+\]
+\[
+L(P\setminus A)\le Q_{k_b}
+\]
+or feasible alternative vehicle assignment.
+
+This operator is very useful because final errors are often route-boundary errors.
+Moving one customer is not enough.
+Two routes sometimes need to be repartitioned together.
+This can be explained with a simple example.
+Assume two routes have customer sets $A$ and $B$.
+A single relocate checks:
+\[
+A' = A\setminus\{i\},\qquad B'=B\cup\{i\}
+\]
+But if the real improvement requires exchanging several customers, then every single relocate may be infeasible or temporarily expensive.
+The two-route repartition instead searches over:
+\[
+\mathcal{P}(A\cup B)
+\]
+the power set of the combined customer pool, but only when the pool is small.
+Thus it can discover:
+\[
+A^*,B^*=\arg\min_{A'\subseteq A\cup B}\{C(A')+C((A\cup B)\setminus A')\}
+\]
+This is much stronger than a single relocate, but still computationally controlled because the pool size is capped.
+
+\subsection{Hunt-End Exact Polish}
+
+At the end of a hunt candidate, exact polish may apply:
+\[
+S'=\text{ExactRoutePolish}(S)
+\]
+then:
+\[
+S''=\text{ExactTwoRouteRepartition}(S')
+\]
+The candidate is accepted only if it improves cost or satisfies progress conditions.
+
+The exact operations are not always-on global brute force.
+They are capped by:
+\begin{itemize}
+    \item customer cap,
+    \item route cap,
+    \item pair cap,
+    \item minimum-gain threshold.
+\end{itemize}
+This protects computation time.
+
+\subsection{Ejection Chain}
+
+Ejection chain is stronger than repeated single relocate.
+A chain can be:
+\[
+i_1:R_a\rightarrow R_b
+\]
+which ejects:
+\[
+i_2:R_b\rightarrow R_c
+\]
+which may eject:
+\[
+i_3:R_c\rightarrow R_d
+\]
+
+The chain depth is:
+\[
+d_{chain}=d_0+I(p_h>0)d_{bonus}
+\]
+Current base depth:
+\[
+d_0=2
+\]
+and plateau adds one more step.
+
+This operator is useful when inserting a customer requires making room in another route.
+A single relocate may be infeasible, but a chain can be feasible.
+
+\subsection{Strong Ejection Local Search}
+
+Strong ejection local search applies ejection chain repeatedly and then cleanup if needed.
+It is used after pack crossover, route pool and archive offspring generation.
+This is important because recombination may create a good global structure but still leave some local route boundary issues.
+Ejection chain cleans those issues better than ordinary relocate in many cases.
+
+\subsection{Stagnation Kick}
+
+If stagnation exceeds the threshold, the algorithm applies a kick.
+Current threshold:
+\[
+s_h\ge 1
+\]
+The kick ruin fraction is:
+\[
+\rho_{kick}=\min(\rho_{cap},\rho+\rho_{boost})
+\]
+Current:
+\[
+\rho_{boost}=0.20
+\]
+\[
+\rho_{cap}=0.55
+\]
+
+The kick sequence is:
+\begin{itemize}
+    \item route-oriented ruin,
+    \item focused cluster rebuild,
+    \item outlier purge,
+    \item route surgery,
+    \item local search.
+\end{itemize}
+
+It is not a random restart.
+A random restart would throw away too much useful structure.
+The kick breaks only enough structure to leave the current basin.
+
+\subsection{Diversification Burst}
+
+During plateau, diversification burst can modify a small number of non-alpha wolves.
+The burst uses larger ruin:
+\[
+\rho_{burst}=\min(\rho_{cap},\rho\cdot \mu_{burst})
+\]
+Current:
+\[
+\mu_{burst}=1.45
+\]
+
+Only a few wolves are affected.
+This is done so the population does not lose all quality.
+The goal is not randomness.
+The goal is to create different promising regions.
+
+\subsection{Candidate Progress Rule}
+
+The algorithm does not always compare by raw cost only.
+For structural phases, a candidate can be considered progress if:
+\[
+f(S')<f(S)
+\]
+or:
+\[
+f(S')\le f(S)+\epsilon
+\]
+and route pathology decreases enough.
+
+This rule is used carefully.
+Global best update still requires a hard-feasible cost improvement.
+So the final reported best is not structurally-better-but-more-expensive.
+But intermediate candidates may be kept if they are more repairable.
+
+\subsection{Full Main Loop}
+
+The high-level algorithm is:
+
+\textbf{Input:}
+\[
+P=(V,E,\mathcal{K},q,d,Q,\gamma,F,u,m,\text{time constraints})
+\]
+\textbf{Output:}
+\[
+S^*
+\]
+best hard-feasible solution.
+
+\begin{enumerate}
+    \item Load the instance.
+    \item Build distance matrix and vehicle-type groups.
+    \item Generate the initial wolf population.
+    \item Evaluate each wolf.
+    \item Initialize global best.
+    \item Initialize elite pool.
+    \item Initialize artificial archive.
+    \item Initialize closed-region memory.
+    \item Initialize destroy bandit.
+    \item Initialize hunt-operator bandit.
+    \item For each hunt:
+    \begin{enumerate}
+        \item Compute plateau level.
+        \item Update ruin fraction and chain passes.
+        \item Reset wolf blood.
+        \item Activate strategic oscillation.
+        \item Run free search.
+        \item Deactivate strategic oscillation.
+        \item Select alpha.
+        \item Hunt around alpha.
+        \item Apply hunt-end exact polish.
+        \item Apply stagnation kick if needed.
+        \item Apply diversification burst if plateau condition matches.
+        \item Apply full moon phase.
+        \item Update global best if improved.
+        \item Update stagnation counter.
+        \item Add closed region.
+        \item Update elite pool.
+        \item Update archive.
+        \item Generate archive offspring.
+        \item Inject strong diverse archive children.
+        \item If pulse hunt, run micro-HGS.
+        \item Update operator statistics.
+        \item Print hunt summary.
+    \end{enumerate}
+    \item Return global best.
+\end{enumerate}
+
+\subsection{Hunt Around Alpha}
+
+The hunt stage is the most important stage after free search.
+For each non-alpha wolf, the algorithm selects a guide.
+The guide can be:
+\[
+G\in\{S_\alpha,\mathcal{E},\mathcal{A}\}
+\]
+Then the wolf performs:
+\begin{itemize}
+    \item alpha-guided rebuild,
+    \item targeted cleanup,
+    \item elite path relinking,
+    \item operator-bandit selected large move,
+    \item hunt-end exact polish.
+\end{itemize}
+
+The large move can be pack crossover, ejection, merge, route pool or fallback ruin-and-rebuild.
+The selected operator receives reward based on result quality.
+
+This is where the old repeated RR logic was replaced.
+There can still be hunt chain passes, but the algorithm is no longer just repeating ruin-and-rebuild.
+It now has several stronger structural alternatives.
+
+\subsection{Fallback Operator}
+
+Fallback is still needed.
+Sometimes pack crossover, ejection or route pool may fail to produce a feasible better candidate.
+Fallback uses adaptive ruin-and-rebuild and cleanup.
+It is a safety operator.
+It prevents the hunt from doing nothing.
+
+\subsection{Merge Operator}
+
+Merge-and-repartition is used by the operator bandit.
+It selects bad or related routes, combines their customer pool, and decodes/rebuilds them.
+It is useful when route boundaries are wrong but the pool is too large for exact two-route repartition.
+
+\subsection{Route Pool Operator}
+
+The route pool operator builds candidate routes from:
+\begin{itemize}
+    \item base state,
+    \item guide state,
+    \item elite states,
+    \item archive states,
+    \item global best.
+\end{itemize}
+It then attempts to form a complete solution from selected route fragments.
+This is most useful in the final stage because good routes from different solutions can be combined.
+
+\subsection{Pulse Hunts}
+
+A hunt is pulse if:
+\[
+h \bmod H_{pulse}=0
+\]
+Pulse mode increases:
+\begin{itemize}
+    \item pair-operator intensity,
+    \item intra-route operator intensity,
+    \item path-operator intensity,
+    \item cleanup probability,
+    \item full moon attempts.
+\end{itemize}
+
+Pulse mode can be interpreted as a scheduled intensification and diversification burst.
+It is not triggered only by stagnation.
+This keeps the search rhythm from becoming too flat.
+
+\subsection{Runtime Budget and Parallel Evaluation}
+
+BloodhoundTest3 is intentionally heavier than a simple local search, so runtime control is part of the algorithmic design.
+The expensive mechanisms are not called without restriction.
+Most of them are activated only when one of the following conditions exists:
+\begin{itemize}
+    \item plateau level is greater than zero,
+    \item the current hunt is a pulse hunt,
+    \item $\beta_{\max}(S)$ is high,
+    \item the customer pool size is below the exact-search cap.
+\end{itemize}
+
+The algorithm parallelizes only selected parts of the search.
+The most natural parallel level is the wolf level:
+\[
+W_1,W_2,\dots,W_p
+\]
+because wolves can hunt around the alpha independently before the best candidates are collected.
+Route-pool rebuild attempts and selected local search candidates can also be evaluated in parallel.
+However, parallel evaluation is treated carefully.
+It is not only a speed improvement.
+If several candidate operators are evaluated at the same time and the best one is selected, the search trajectory may differ from a sequential procedure.
+Therefore, parallel local search can slightly change solution quality even when the same random seed is used.
+
+The runtime philosophy can be summarized as:
+\begin{quote}
+Spend exact or heavy computation only on small suspicious structures, not on the whole solution.
+\end{quote}
+For example, exact TSP is applied to small routes, exact repartition is applied to at most a small two-route customer pool, and route-pool reconstruction is capped by the number of stored route entries.
+This makes the algorithm usable in larger instances.
+
+\subsection{Homogeneous Fleet Behavior}
+
+For homogeneous fleets:
+\[
+Q_k=Q,\quad \gamma_k=\gamma,\quad F_k=F,\quad u_k=u
+\]
+for all $k$.
+Then many heterogeneous-specific decisions become unnecessary.
+For example:
+\[
+k_r^*=\arg\min_k(F_k+\gamma_kD_r)
+\]
+returns equivalent vehicle types.
+
+Because of this, the report should not claim that BloodhoundTest3 is primarily a homogeneous CVRP solver.
+It can solve homogeneous instances, but its architecture is more complex than needed for them.
+This is especially relevant for benchmark discussion.
+If a simple homogeneous set is used, it is fair to say:
+BloodhoundTest3 is applicable, but not necessarily the most efficient specialized method.
+
+\subsection{Heterogeneous Fleet Behavior}
+
+For heterogeneous fleets, the algorithm has more real decisions.
+The best type for route $r$ is:
+\[
+k_r^*=\arg\min_{k\in\mathcal{K}}(F_k+\gamma_kD_r)
+\]
+subject to:
+\[
+L_r\le Q_k
+\]
+\[
+n_k(S)<m_k
+\]
+and time feasibility.
+
+Route structure and vehicle type interact.
+A longer route may be acceptable if assigned to a cheaper vehicle.
+A heavier route may need a larger vehicle.
+A route with high fixed-cost vehicle may need enough load to justify it.
+These are exactly the cases where BloodhoundTest3 has a reason to be complicated.
+
+\subsection{Very Constrained Problem Behavior}
+
+When capacity or route duration is tight, the feasible space becomes fragmented.
+Many local moves fail because they create temporary infeasibility.
+BloodhoundTest3 addresses this by:
+\begin{itemize}
+    \item strategic oscillation,
+    \item ejection chain,
+    \item exact two-route repartition,
+    \item route community rebuild,
+    \item plateau ruin boost.
+\end{itemize}
+
+This is the kind of problem where the algorithm is expected to show its main strength.
+It is built for cases where ordinary relocate/swap cannot easily cross feasibility barriers.
+
+\subsection{Known Benchmark Caution}
+
+Some benchmark files can be misleading.
+For example, two XML instances may have different names but the same effective constraints in the file.
+If one classical benchmark value assumes a missing route duration constraint, comparing directly is wrong.
+
+Therefore, before reporting an optimality gap:
+\[
+gap=\frac{f(S)-f^*}{f^*}\times 100
+\]
+the following must be checked:
+\begin{itemize}
+    \item same distance rule,
+    \item same depot mapping,
+    \item same demands,
+    \item same vehicle capacities,
+    \item same fixed and variable costs,
+    \item same route duration and time constraints.
+\end{itemize}
+
+Otherwise the algorithm may appear to beat an optimum.
+That usually means the compared problems are not identical.
+
+\subsection{Mechanisms Removed or Reduced from Older Explanations}
+
+The older report should not present repeated RR as the main final mechanism anymore.
+The current code uses hunt chain passes, but the important final mechanisms are:
+\begin{itemize}
+    \item pack crossover,
+    \item route pool,
+    \item ejection chain,
+    \item pulse micro-HGS,
+    \item exact route polish,
+    \item exact two-route repartition.
+\end{itemize}
+
+Also, old route-matrix-only crossover should not be overemphasized.
+The current recombination logic is giant-tour and split-decoder based.
+
+The report should also not say that every cleanup result is accepted at the end even if expensive.
+The structural slack is used inside cleanup candidate comparison.
+Global best still requires hard-feasible lower cost.
+
+\subsection{Expected Advantages}
+
+BloodhoundTest3 is expected to perform well when:
+\begin{itemize}
+    \item the fleet is heterogeneous,
+    \item capacity is tight,
+    \item route duration or time feasibility exists,
+    \item route partitioning is difficult,
+    \item late-stage local search becomes stuck,
+    \item good solutions require recombining different route regions.
+\end{itemize}
+
+The main advantage is multi-scale search.
+The algorithm can do:
+\begin{itemize}
+    \item single-route local improvement,
+    \item two-route exact repartition,
+    \item multi-route rebuild,
+    \item route pool recombination,
+    \item genetic giant-tour crossover,
+    \item population-level diversification.
+\end{itemize}
+
+This combination is what makes it different from a standard local search or a simple genetic algorithm.
+
+\subsection{Expected Weaknesses}
+
+The algorithm may be less efficient on simple homogeneous CVRP datasets.
+In that case, mechanisms such as vehicle reassignment and heterogeneous split evaluation do not provide much extra information.
+Also, archive and pulse-HGS may create overhead when a simpler HGS or ALNS would be enough.
+
+Another weakness is parameter complexity.
+The algorithm has many thresholds:
+\[
+\rho,\quad p_{cleanup},\quad \theta_E,\quad \theta_A,\quad n_{TSP},\quad n_{2route},\quad H_{pulse}
+\]
+This makes it flexible but also harder to tune.
+In the final report this should be admitted clearly, because hiding it would not be honest.
+
+\subsection{Computational Results}
+
+This part gives the main numerical results obtained with BloodhoundTest3.
+The table is kept more compact than the NSGA-II result section, because here the algorithm has a single main objective value.
+For the homogeneous CMT instances, the reference value is the known optimum or benchmark value used in the experiment.
+For the heterogeneous instances, the reference value was obtained by solving a simpler decomposition model with Gurobi.
+In that model, a cluster-first route-second logic was used.
+Several cluster counts and different clustering alternatives were tested, and the best Gurobi result among these trials was selected as the reference value.
+So, for heterogeneous cases, the value in the reference column should be read carefully.
+It is a useful baseline, but it is not necessarily the true mathematical optimum of the full integrated heterogeneous routing problem.
+This is a bit important, because Bloodhound can sometimes pass that baseline, and this does not mean that it beats a proven optimum.
+It mostly means that the cluster-first decomposition may have fixed customer groups in a way that excludes the true global best routing structure.
+
+\[
+\text{Gap}=\frac{f_{BH}-f_{ref}}{f_{ref}}
+\]
+where $f_{BH}$ is the BloodhoundTest3 objective value and $f_{ref}$ is the reference value.
+For the heterogeneous instances, if BloodhoundTest3 gives a lower value than the cluster-first route-second Gurobi baseline, the gap is written as approximately zero because the baseline itself is not exact optimal.
+
+\begin{table}[htbp]
+\centering
+\caption{BloodhoundTest3 computational results}
+\begin{tabular}{lrrrrrl}
+\hline
+\textbf{Instance} & \textbf{Reference} & \textbf{Bloodhound} & \textbf{Gap} & \textbf{Time} & \textbf{Nodes} & \textbf{Fleet} \\
+\hline
+CMT01 & 524.61 & 524.61 & 0.000 & 28.172 & 51 & Homogeneous \\
+CMT02 & 835.26 & 846.98 & 0.013 & 132.453 & 76 & Homogeneous \\
+CMT03 & 826.14 & 848.27 & 0.026 & 312.26 & 101 & Homogeneous \\
+CMT04 & 1028.42 & 1076.12 & 0.046 & 346.13 & 151 & Homogeneous \\
+CMT05 & 1291.45 & 1362.54 & 0.057 & 413.8 & 200 & Homogeneous \\
+HET-50 & 846 & 827 & $\sim$0 & 33.196 & 50 & Heterogeneous \\
+HET-120 & 1526 & 1545 & 0.0124 & 319.41 & 120 & Heterogeneous \\
+HET-180 & 2916 & 2980 & 0.0219 & 396.77 & 180 & Heterogeneous \\
+\hline
+\end{tabular}
+\end{table}
+
+The homogeneous results show that BloodhoundTest3 is able to reach good values on classical CVRP-like instances.
+For CMT01, the algorithm reaches the reference value exactly.
+For the larger homogeneous instances, the gap increases slowly from CMT02 to CMT05.
+This is not very surprising.
+These instances have identical vehicles, and a part of BloodhoundTest3 is actually designed for vehicle heterogeneity and structural constraint handling.
+Because of this, some operators do not give their full benefit in these cases.
+Still, the results are useful because they show that the algorithm does not fail on homogeneous problems.
+It is just not the most specialized method for them.
+
+The heterogeneous results are more related to the real purpose of the algorithm.
+These cases were compared with a Gurobi-based cluster-first route-second baseline.
+This baseline first groups the customers and then solves the routing part in a simpler way.
+To make this baseline less dependent on one clustering decision, more than one cluster number and more than one clustering structure were tested.
+The reported Gurobi value is the best one obtained from these alternatives.
+It is a practical method, but since clustering is fixed before routing, some route combinations can be missed.
+BloodhoundTest3 does not freeze the cluster boundaries in that way.
+It can move customers between route communities, repair route borders, and change vehicle assignments during search.
+For this reason the comparison is not exactly the same as comparing against a full exact Gurobi optimum.
+It is more like comparing against a simple exact-assisted baseline, even if that baseline was improved by trying several clustering alternatives.
+
+In the 50-node heterogeneous instance, BloodhoundTest3 obtains a lower cost than the cluster-first route-second Gurobi baseline.
+This result should be interpreted as Bloodhound finding a better integrated routing structure than the decomposed baseline, not as proving global optimality.
+The most likely reason is that the Gurobi experiment solved the problem after clustering, and even with several cluster counts and clustering variants, this decomposition can still miss a route structure where customers move across cluster borders.
+For the 120-node and 180-node heterogeneous instances, the gaps are 0.0124 and 0.0219.
+These values are small, especially considering that the instances are heterogeneous and the algorithm is not using a full exact model for the whole problem.
+The computation time also stays in a usable range for these sizes.
+
+Overall, the result pattern matches the expectation of the algorithm.
+BloodhoundTest3 can be used on homogeneous instances, but it is more meaningful for heterogeneous and constrained routing cases.
+In homogeneous cases, some parts of the algorithm become almost extra machinery.
+In heterogeneous cases, those same parts become useful because the algorithm must decide not only the customer order, but also the route partition and the vehicle type assignment.
+
+\subsection{Conclusion}
+
+BloodhoundTest3 is a hybrid, population-based and constraint-aware metaheuristic for vehicle routing.
+Its main purpose is not to be the shortest possible implementation.
+It is designed to work on realistic heterogeneous routing problems where feasibility, vehicle assignment and route structure interact.
+
+The final version includes:
+\begin{itemize}
+    \item blood-based acceptance,
+    \item strategic oscillation,
+    \item adaptive plateau control,
+    \item elite and archive memory,
+    \item ALNS-style operator credit,
+    \item targeted cleanup,
+    \item full moon structural repair,
+    \item giant-tour split decoder,
+    \item pack crossover,
+    \item pulse micro-HGS,
+    \item route pool recombination,
+    \item ejection chain,
+    \item small exact subproblem optimization.
+\end{itemize}
+
+The important point is the interaction of these parts.
+BloodhoundTest3 first explores, then follows strong guides, then repairs structure, then recombines route regions, and finally applies exact methods only on small subproblems where exactness is cheap.
+That is why the algorithm should be described as a routing framework for heterogeneous and constrained cases, not only as a homogeneous CVRP heuristic.

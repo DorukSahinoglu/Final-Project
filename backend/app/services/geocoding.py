@@ -9,6 +9,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db import models
 from app.schemas.geocode import GeocodeResponse, GeocodeResult
+from app.services.settings import SettingsService
 
 
 logger = get_logger(__name__)
@@ -18,6 +19,7 @@ class GeocodingService:
     def __init__(self, db: Session) -> None:
         self.db = db
         self.settings = get_settings()
+        self.settings_service = SettingsService(db)
 
     def geocode_project(self, project_id: str, address_ids: list[str]) -> GeocodeResponse:
         project = self.db.get(models.Project, project_id)
@@ -55,9 +57,30 @@ class GeocodingService:
         return GeocodeResponse(project_id=project_id, results=results)
 
     def _geocode_address(self, address_line: str) -> dict[str, Any]:
+        google_api_key = self.settings_service.get_google_api_key()
+        if google_api_key:
+            return self._geocode_google(address_line, google_api_key)
         if self.settings.geocoder_provider == "none":
             return {"status": "failed", "message": "No geocoder provider configured."}
+        return self._geocode_nominatim(address_line)
 
+    def _geocode_google(self, address_line: str, api_key: str) -> dict[str, Any]:
+        params = {"address": address_line, "key": api_key}
+        with httpx.Client(timeout=20.0) as client:
+            response = client.get("https://maps.googleapis.com/maps/api/geocode/json", params=params)
+            response.raise_for_status()
+            payload = response.json()
+        if payload.get("status") != "OK" or not payload.get("results"):
+            return {"status": "failed", "message": payload.get("status", "Google geocode failed.")}
+        location = payload["results"][0]["geometry"]["location"]
+        return {
+            "status": "ready",
+            "provider": "google",
+            "latitude": float(location["lat"]),
+            "longitude": float(location["lng"]),
+        }
+
+    def _geocode_nominatim(self, address_line: str) -> dict[str, Any]:
         params = {"q": address_line, "format": "jsonv2", "limit": 1}
         headers = {"User-Agent": self.settings.geocoder_user_agent}
         with httpx.Client(timeout=20.0, headers=headers) as client:

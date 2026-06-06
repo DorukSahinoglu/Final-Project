@@ -1,0 +1,1296 @@
+\section{Metaheuristic Optimization Framework: Bloodhound}
+
+The fast increase in computational complexity observed in exact optimization methods for large scale heterogeneous vehicle routing problem necessitates the development of advanced metaheuristic frameworks capable of efficiently exploring highly constrained search spaces. While classical metaheuristics such as Genetic Algorithms, Simulated Annealing and Tabu Search provide flexible searching mechanisms, they often suffers from premature convergence, insufficient exploration or excessive dependence on parameter tuning when applied to constraint heavy routing problems.\par
+
+In particular real-world routing problems involve multiple layers of complexity, including heterogeneous fleets, capacity constraints and non-linear cost interactions. These create a rugged and highly non-convex search landscape with a lot of local optima. Classical neighborhood-based and population-based methods tend to either over-exploit regions or fail to maintain diversity among population, resulting in a suboptimal performance for large scale problems.\par
+
+To address these limitations, this study introduces a novel metaheuristic framework referred as \textit{Bloodhound Algorithm}. Inspired by collective hunting behavior and adaptive pursuit strategies observed in wolves, this method integrates population based search, probabilistic acceptance mechanisms, adaptive memory structures and guided reconstruction operators into a unified optimization framework.\par
+
+Unlike classical metaheuristics that rely solely on objective improvement or deterministic selection, the Bloodhound Algorithm introduces a dynamic \textit{energy-based acceptance model}, referred to as \textit{blood dynamics}, which balances the exploration and exploitation at individual agent level. This mechanism enables controlled acceptance of non-improving moves, allowing the process to escape local optima while maintains pressure toward high quality regions.\par
+
+Furthermore, the algorithm uses a \textit{region-based memory system} that penalizes revisiting previously explored patterns within the solution space. By representing solutions through edge-based signatures and tracking historically exploited regions, Bloodhound effectively prevents cycling and promotes diversification without requiring tabu structures.\par
+
+Another key contribution of this framework is the integration of an \textit{alpha-guided reconstruction mechanism}, where high-quality solutions dynamically affects the search trajectory of the population. This mechanism enables a structured intensification phase in which partial solution inheritance, combined with ruin-and-rebuild strategies. This mechanism allows the algorithm to refine promising regions of the search space.\par
+
+Overall framework operates through alternating phases of stochastic exploration and guided exploitation, enabling the algorithm to balance diversification and intensification in a adaptive and dynamic manner. By combining local search operators, probabilistic acceptance rules, adaptive scaling of solution differences and population dynamics, the Bloodhound Algorithm provides a robust and flexible approach for solving large scape heterogeneous vehicle routing problems.\par
+
+The following sections present a detailed mathematical formulation of the algorithm, including solution representation, population dynamics, energy-based acceptance mechanism region memory modeling and search procedures.
+
+\subsection{Solution Representation and State Encoding in the Bloodhound Framework}
+
+Within the bloodhound algorithm each candidate solution is represented as a structured state capturing both routing decisions and associated operational attributes. Unlike classical encodings that only store permutation-based representations, this framework maintains a multi-layered state representation that explicitly models route structure, vehicle assignment and dynamic performance metrics.\par
+
+Formally a solution state is defined as:
+\[
+S = (\mathcal{R}, \mathcal{V}, \mathbf{L}, \mathbf{D}, \mathbf{T}, \mathbf{C}, f(S))
+\]
+
+where:
+\begin{itemize}
+    \item $\mathcal{R} = \{R_1, R_2, \dots, R_k\}$ is the set of routes,
+    \item $\mathcal{V} = \{v_1, v_2, \dots, v_k\}$ denotes vehicle assignments for each route,
+    \item $\mathbf{L} = (L_1, L_2, \dots, L_k)$ represents route loads,
+    \item $\mathbf{D} = (D_1, D_2, \dots, D_k)$ represents route distances,
+    \item $\mathbf{T} = (T_1, T_2, \dots, T_k)$ represents route completion times,
+    \item $\mathbf{C} = (C_1, C_2, \dots, C_k)$ represents route costs,
+    \item $f(S)$ is the total cost of the solution.
+\end{itemize}
+
+\paragraph{Route Encoding}
+
+Each route is encoded as an ordered sequence:
+\[
+R_r = (0, i_1, i_2, \dots, i_p, 0)
+\]
+
+To ensure consistency, a normalized operator is applied:
+To ensure consistency, a normalization operator is applied:
+\[
+\mathcal{N}(R_r) = (0, i_1, i_2, \dots, i_p, 0)
+\]
+which guarantees that all routes explicitly start and end at the depot.
+---
+
+\paragraph{Solution Cost Function}
+
+The total cost of the solution is computed as:
+The total cost of a solution is computed as:
+\[
+f(S) = \sum_{r=1}^{k} C_r
+\]
+
+where:
+\[
+C_r = F_{v_r} + \gamma_{v_r} \cdot D_r
+\]
+
+and:
+\[
+D_r = \sum_{j=0}^{|R_r|-1} d_{i_j,i_{j+1}}
+\]
+
+
+\paragraph{Feasibility Indicator}
+A binary feasibility indicator is defined as:
+\[
+\phi(S) =
+\begin{cases}
+1, & \text{if all constraints are satisfied} \\
+0, & \text{otherwise}
+\end{cases}
+\]
+
+To discourage infeasible solutions, a penalty-augmented objective is used:
+\[
+f'(S) = f(S) + M \cdot (1 - \phi(S))
+\]
+where $M$ is large penalty constant.
+
+
+
+\paragraph{Wolf State Representation}
+
+Each search agent (Wolf) is associated with a dynamic state:
+\[
+W_i = (S_i, S_i^{best}, B_i, q_i, \mathcal{H}_i)
+\]
+
+where:
+\begin{itemize}
+    \item $S_i$ is the current solution,
+    \item $S_i^{best}$ is the best solution found by the wolf,
+    \item $B_i$ represents the blood level (search energy),
+    \item $q_i$ is the normalized quality score,
+    \item $\mathcal{H}_i$ is the historical improvement set.
+\end{itemize}
+
+
+
+\paragraph{Quality Normalization}
+
+To allow relative comparison among wolves, a normalized quality score is defined as:
+\[
+q_i = \frac{f_{\max} - f(S_i)}{f_{\max} - f_{\min}}
+\]
+
+where $f_{\min}$ and $f_{\max}$ are the best and worst costs in the current population.
+
+
+\paragraph{Structural Representation via Edge Sets}
+
+In addition to route sequences, each solution is mapped into an edge-based representation:
+\[
+E(S) = \{ (i,j) \mid (i,j) \in R_r \ \forall r \}
+\]
+To ensure uniqueness:
+\[
+e_{ij} =
+\begin{cases}
+(i,j), & i < j \\
+(j,i), & \text{otherwise}
+\end{cases}
+\]
+
+This representation is later used for region similarity detection and memory-based penalization.
+
+
+\paragraph{Similarity Measure Between Solutions}
+
+Given two solutions $S_a$ and $S_b$, their structural similarity is defined as:
+\[
+\text{sim}(S_a, S_b) = \frac{|E(S_a) \cap E(S_b)|}{|E(S_b)|}
+\]
+
+This metric plays a critical role is preventing the algorithm from revisiting previously explored regions of the search space.
+
+
+The presented representation gives a expressive encoding that enables Bloodhound Algorithm to simultaneously track structural,operational and historical information. This representation is critical for supporting advanced mechanisms such as energy-based acceptance, adaptive scaling and region-based memory, which will be detailed in the following sections.
+
+\subsection{Blood-Based Acceptance Mechanism}
+
+One of the most critical challenges in designing a high-performance metaheuristic is achieving a balance between exploration and exploitation. Classical strategies typically rely on rigid acceptance mechanisms that are either overly greedy or excessively stochastic. For example, overly greedy approaches accept only improving solutions:
+\[
+S_{t+1} =
+\begin{cases}
+S', & \text{if } f(S') < f(S_t) \\
+S_t, & \text{otherwise}
+\end{cases}
+\]
+which leads to premature convergence in complex landscapes.
+On the other hand probabilistic methods such as Simulated Annealing introduce stochastic acceptance through a temperature-dependent probability:
+\[
+P(\text{accept}) = \exp\left(-\frac{\Delta}{T}\right)
+\]
+
+where $T$ is externally controlled. While this approach allows the algorithm to escape local optima, it suffers from two limitations: (i) it requires careful parameter tuning and (ii) it imposes a global exploitation schedule that does not adapt to local state of individual solutions.
+
+\par
+
+In highly constrained routing problems, the search space has strong discontinuities due to feasibility constraints, route permutations and non-linear interactions between cost components. In these environments, neither purely greedy nor globally controlled stochastic mechanisms are effective.\par
+
+To overcome these limitations, the Bloodhound Algorithm introduces a fundamentally different mechanism: a \textit{resource-driven acceptance mechanism}, referred to as \textit{blood dynamics}. Instead of relying on an external temperature parameter, each agent is assigned an internal resource variable:
+\[
+B_i \in \mathbf{R}_{\geq 0}
+\]
+which governs its ability to explore non-improving regions of the search space.
+\par
+
+This formulation transforms the acceptance process into a \textit{state-dependent dynamic system} where exploration capability is not predefined but emerges from the process itself.
+
+\par
+
+\paragraph{Solution Transition Dynamics}
+
+Let $S_i^{(t)}$ denote the solution of wolf $i$ at iteration $t$ and let $S_i$ be a candidate solution generated by a neighborhood operator:
+\[
+S_i' \sim \mathcal{N}(S_i^{(t)})
+\]
+
+The cost difference is defined as:
+\[
+\Delta_i^{(t)} = f(S_i') - f(S_i^{(t)})
+\]
+
+To capture the temporal evolution of improvements, we define a sequence:
+\[
+\{\Delta_i^{(1)}, \Delta_i^{(2)}, \dots, \Delta_i^{(t)}\}
+\]
+
+
+
+\paragraph{Robust Scaling of Cost Differences}
+
+Due to potentially large variations in cost values, a normalized difference is computed using a robust scale estimator:
+
+\[
+\sigma_i^{(t)} = \text{median} \left( |\Delta_i^{(t-k)}|, \dots, |\Delta_i^{(t)}| \right)
+\]
+
+\[
+\hat{\Delta}_i^{(t)} = \frac{\Delta_i^{(t)}}{\sigma_i^{(t)} + \epsilon}
+\]
+
+where $\epsilon > 0$ ensures numerical stability.
+
+This scaling ensures that acceptance decisions depend on relative change rather than absolute magnitude:
+\[
+\hat{\Delta}_i^{(t)} \approx \mathcal{O}(1)
+\]
+
+
+\paragraph{Region-Based Similarity Penalization}
+
+Let $\mathcal{R} = \{E_1, E_2, \dots, E_m\}$ denote the set of previously explored regions, represented as edge sets.
+
+Each solution is mapped to an edge signature:
+\[
+E(S) = \{(i,j) \mid (i,j) \in S\}
+\]
+
+The similarity between a candidate solution and historical regions is defined as:
+\[
+\text{sim}(S_i', \mathcal{R}) = \max_{E_k \in \mathcal{R}} \frac{|E(S_i') \cap E_k|}{|E_k|}
+\]
+
+The effective cost difference becomes:
+\[
+\tilde{\Delta}_i^{(t)} = \hat{\Delta}_i^{(t)} + \lambda \cdot \text{sim}(S_i', \mathcal{R})
+\]
+
+
+\paragraph{Acceptance Function}
+
+The acceptance decision is governed by a two stage mechanism:\par
+\textbf{(i) Deterministic improvement acceptance:}
+\[
+\text{if } \Delta_i^{(t)} \leq 0 \Rightarrow S_i^{(t+1)} = S_i'
+\]
+
+\textbf{(ii) Probabilistic acceptance for worsening moves:}
+\[
+P_i^{(t)} = \exp\left(-a \cdot (\tilde{\Delta}_i^{(t)})^b \right)
+\]
+
+\[
+u \sim \mathcal{U}(0,1)
+\]
+
+\[
+\text{accept if } u \leq P_i^{(t)}
+\]
+
+
+\paragraph{Blood Accumulation Process}
+
+Improving moves generate energy (blood):
+\[
+B_i^{(t+1)} = B_i^{(t)} + \delta_i^{(t)}
+\]
+where:
+\[
+\delta_i^{(t)} = \alpha + \max(0, -\hat{\Delta}_i^{(t)}) + \beta \cdot q_i^{(t)}
+\]
+and:
+\[
+q_i^{(t)} = \frac{f_{\max}^{(t)} - f(S_i^{(t)})}{f_{\max}^{(t)} - f_{\min}^{(t)}}
+\]
+
+
+
+\paragraph{Blood Consumption Mechanism}
+
+Non-improving moves require expenditure of blood:
+\[
+\pi_i^{(t)} = c \cdot \left( e^{b_p \cdot \tilde{\Delta}_i^{(t)}} - 1 \right)
+\]
+The acceptance condition becomes:
+\[
+u \leq P_i^{(t)} \quad \text{and} \quad B_i^{(t)} \geq \pi_i^{(t)}
+\]
+If accepted:
+\[
+B_i^{(t+1)} = \max(0, B_i^{(t)} - \pi_i^{(t)})
+\]
+
+\paragraph{Unified Transition Rule}
+The complete state transition can be expressed as:
+\[
+S_i^{(t+1)} =
+\begin{cases}
+S_i', & \text{if } \Delta_i^{(t)} \leq 0 \\
+S_i', & \text{if } \Delta_i^{(t)} > 0 \land u \leq P_i^{(t)} \land B_i^{(t)} \geq \pi_i^{(t)} \\
+S_i^{(t)}, & \text{otherwise}
+\end{cases}
+\]
+
+\paragraph{Dynamic System Interpretation}
+
+The evolution of the system can be shown as a coupled dynamical process:
+\[
+S_i^{(t+1)} = \mathcal{T}(S_i^{(t)}, B_i^{(t)}, \mathcal{R})
+\]
+\[
+B_i^{(t+1)} = \mathcal{G}(B_i^{(t)}, \hat{\Delta}_i^{(t)}, q_i^{(t)})
+\]
+where:\begin{itemize}
+    \item $\mathcal{T}(\cdot)$ represents the transition operator,
+    \item $\mathcal{G}(\cdot)$ represents the energy update mechanism.
+\end{itemize}
+
+\paragraph{Interpretation and Impact on Search Behavior}
+This formulation introduces a fundamentally different search mechanism:
+\begin{itemize}
+    \item Exploration is \textit{earned} through improvements,
+    \item Diversification is \textit{resource-constrained},
+    \item The search process becomes \textit{self-adaptive},
+    \item Agents dynamically transition between greedy and stochastic behavior.
+\end{itemize}
+
+As a result, the Bloodhound Algorithm avoids both premature convergence and excessive randomness, achieving a both controlled and flexible search process, capable of efficiently searching combinatorial optimization search spaces.
+
+\subsection{Exploration Phase: Stochastic Neighborhood Search}
+
+A fundamental component of the Bloodhound Algorithm is the exploration phase, in which each agent performs stochastic movements within the solution space through the application of different neighborhood operators. The purpose of this phase is to enable continuous diversification while preserving feasibility and structural integrity of solutions.
+\par
+
+In classical local search methods, neighborhood structures are typically fixed and deterministic. Given a solution $S$, a set of neighborhood solutions $\mathcal{N}(S)$ is defined and the process continues by selecting the best candidate within this neighborhood:
+\[
+S^{(t+1)} = \arg\min_{S' \in \mathcal{N}(S^{(t)})} f(S')
+\]
+
+However these strategies often result in fast convergence to local optima, especially in exponentially large search spaces.
+\par
+
+To overcome these issue, the Bloodhound Algorithm adopts a stochastic neighborhood sampling strategy, where candidate solutions are generated randomly from a diverse neighborhood structure:
+\[
+S' \sim \mathcal{N}_{\text{total}}(S)
+\]
+where:
+\[
+\mathcal{N}_{\text{total}}(S) = \bigcup_{k=1}^{K} \mathcal{N}_k(S)
+\]
+
+Each $\mathcal{N}_k(S)$ corresponds to a different transformation operator.
+
+
+\paragraph{Neighborhood Operator Selection}
+At each exploration step, a neighborhood operator is selected according to a uniform distribution:
+\[
+k \sim \mathcal{U}(\{1,2,\dots,K\})
+\]
+
+The candidate solution is then generated as:
+\[
+S' = \mathcal{N}_k(S)
+\]
+This formulation ensures that different structural transformations are explored without bias.
+
+
+\paragraph{Intra-route 2-opt Operator}
+
+The intra-route 2-opt operator performs a segment reversal within a route. Let a route be defined as:
+\[
+R = (0, i_1, i_2, \dots, i_p, 0)
+\]
+
+Select two indices $a, b$ such that $1 \leq a < b \leq p$. The transformed route is:
+\[
+R' = (0, i_1, \dots, i_{a-1}, i_b, i_{b-1}, \dots, i_a, i_{b+1}, \dots, i_p, 0)
+\]
+
+The change in cost is:
+\[
+\Delta = d_{i_{a-1},i_b} + d_{i_a,i_{b+1}} - d_{i_{a-1},i_a} - d_{i_b,i_{b+1}}
+\]
+
+
+
+\paragraph{Inter-route Relocation Operator}
+
+This operator removes a customer from one route and inserts it into another route.
+
+Let:
+\[
+R_a = (0, \dots, i, \dots, 0), \quad R_b = (0, \dots, 0)
+\]
+
+Removing customer $i$ from $R_a$:
+\[
+R_a' = R_a \setminus \{i\}
+\]
+
+Inserting into $R_b$ at position $j$:
+\[
+R_b' = (0, \dots, i_j, i, i_{j+1}, \dots, 0)
+\]
+
+The insertion cost is:
+\[
+\Delta = d_{i_j,i} + d_{i,i_{j+1}} - d_{i_j,i_{j+1}}
+\]
+
+\paragraph{Inter-route Swap Operator}
+
+Two customers from different routes are exchanged.
+
+Let:
+\[
+i \in R_a, \quad j \in R_b
+\]
+
+The transformation:
+\[
+R_a' = (R_a \setminus \{i\}) \cup \{j\}, \quad R_b' = (R_b \setminus \{j\}) \cup \{i\}
+\]
+The total cost variation is:
+\[
+\Delta = \Delta_a + \Delta_b
+\]
+
+where each term is computed locally for the affected edges.
+
+
+
+\paragraph{Intra-route Reinsertion Operator}
+
+A customer is removed and reinserted into a different position within the same route.
+
+\[
+R = (0, \dots, i, \dots, 0)
+\]
+
+\[
+R' = (0, \dots, i_j, i, i_{j+1}, \dots, 0)
+\]
+
+The cost difference:
+\[
+\Delta = (d_{i_j,i} + d_{i,i_{j+1}}) - d_{i_j,i_{j+1}} + \text{removal correction}
+\]
+
+
+
+\paragraph{Vehicle Reassignment Operator}
+
+Given a route $R_r$ assigned to vehicle $k$, a new vehicle $k'$ is selected:
+
+\[
+k' = \arg\min_{v \in \mathcal{K}} C(R_r, v)
+\]
+
+subject to:
+\[
+\sum_{i \in R_r} d_i \leq Q_v
+\]
+
+The cost difference:
+\[
+\Delta = C(R_r, k') - C(R_r, k)
+\]
+
+
+
+\paragraph{Composite Neighborhood Structure}
+
+The total neighborhood is defined as:
+\[
+\mathcal{N}_{\text{total}}(S) =
+\mathcal{N}_{2\text{-opt}}(S)
+\cup \mathcal{N}_{\text{relocate}}(S)
+\cup \mathcal{N}_{\text{swap}}(S)
+\cup \mathcal{N}_{\text{reinsert}}(S)
+\cup \mathcal{N}_{\text{vehicle}}(S)
+\]
+
+
+\paragraph{Stochastic Transition Model}
+
+The exploration step can be represented as a stochastic process:
+
+\[
+S^{(t+1)} = \mathcal{N}_k(S^{(t)}), \quad k \sim \mathcal{U}(1,K)
+\]followed by the acceptance operator:
+\[
+S^{(t+1)} =
+\begin{cases}
+S', & \text{if accepted} \\
+S^{(t)}, & \text{otherwise}
+\end{cases}
+\]
+
+
+\paragraph{Exploration Dynamics}
+
+The overall exploration process can be expressed as:
+\[
+S_i^{(t+1)} = \mathcal{A}\left( \mathcal{N}_k(S_i^{(t)}) \right)
+\]
+
+where:
+\begin{itemize}
+    \item $\mathcal{N}_k(\cdot)$ is the neighborhood operator,
+    \item $\mathcal{A}(\cdot)$ is the blood-based acceptance function.
+\end{itemize}
+
+
+
+\paragraph{Interpretation}
+
+The exploration phase provides continuous sequences of solutions at multiple structural levels:
+
+\begin{itemize}
+    \item Local refinement through intra-route operators,
+    \item Structural reorganization through inter-route operators,
+    \item Resource adaptation through vehicle reassignment.
+\end{itemize}
+
+By combining multiple neighborhood structures within a stochastic framework, the algorithm guarantees that the process does not trapped within a part of solution space. Instead it continuously explores diverse configurations while maintaining feasibility constraints.
+
+
+Integration of stochastic neighborhood selection with the blood-based acceptance mechanism results in highly adaptive exploration strategy, capable of efficiently searching the solution space while maintaining balance between intensification and diversification.
+
+\subsection{Alpha Selection and Dominance Criteria}
+
+In population-based metaheuristics, the mechanism used to identify and promote high-quality solutions plays a critical role in guiding the search towards promising areas. Classical approaches typically rely on a single evaluation criteria such as objective function value minimization:
+\[
+\alpha = \arg\min_{i} f(S_i)
+\]
+However such formulation is often insufficient in complex optimization problems as it neglects other critical aspects such as exploration potential, historical performance or structural diversity.
+\par
+
+To overcome these limitations, the Bloodhound Algorithm introduces a multi-dimensional framework for selecting the leading agent, referred to as the \textit{alpha wolf}. Instead of relying solely on objective function value, the selection integrates three components:
+\begin{itemize}
+    \item accumulated search energy (blood),
+    \item historical solution quality,
+    \item current best objective value.
+\end{itemize}
+
+
+
+\paragraph{Wolf State Representation}
+
+Each wolf $W_i$ is associated with the following attributes:
+\[
+W_i = (S_i, S_i^{best}, B_i, q_i)
+\]
+
+where:
+\begin{itemize}
+    \item $S_i$ is the current solution,
+    \item $S_i^{best}$ is the best solution found by the wolf,
+    \item $B_i$ is the blood level,
+    \item $q_i$ is the normalized quality score.
+\end{itemize}
+
+
+
+\paragraph{Dominance Vector}
+
+To formalize the selection process, each wolf is mapped to a dominance vector:
+\[
+\mathbf{d}_i = (B_i,\; q_i,\; -f(S_i^{best}))
+\]
+
+The components of this vector are ordered according to their priority:
+\begin{enumerate}
+    \item Blood level ($B_i$),
+    \item Quality score ($q_i$),
+    \item Objective value ($f(S_i^{best})$).
+\end{enumerate}
+
+
+
+\paragraph{Lexicographic Dominance Rule}
+
+Given two wolves $W_i$ and $W_j$, we define dominance as:
+\[
+W_i \succ W_j \iff \mathbf{d}_i >_{\text{lex}} \mathbf{d}_j
+\]
+
+which implies:
+\[
+\begin{cases}
+B_i > B_j, & \text{or} \\
+B_i = B_j \land q_i > q_j, & \text{or} \\
+B_i = B_j \land q_i = q_j \land f(S_i^{best}) < f(S_j^{best})
+\end{cases}
+\]
+
+
+\paragraph{Alpha Selection}
+
+The alpha wolf is selected as:
+\[
+\alpha = \arg\max_{i} \mathbf{d}_i
+\]
+
+This ensures that the selected leader is not only the best in terms of cost but also possesses sufficient exploratory capacity.
+
+
+
+\paragraph{Quality Normalization}
+
+The quality score is defined as:
+\[
+q_i = \frac{f_{\max} - f(S_i)}{f_{\max} - f_{\min}}
+\]
+
+where:
+\[
+f_{\min} = \min_i f(S_i), \quad f_{\max} = \max_i f(S_i)
+\]
+
+This normalization maps solution quality into the interval:
+\[
+q_i \in [0,1]
+\]
+
+
+
+\paragraph{Interpretation of Dominance Criteria}
+
+The multi-criteria dominance mechanism introduces several important properties:
+
+\begin{itemize}
+    \item Wolves with higher blood levels are prioritized, as they have demonstrated recent improvement capability,
+    \item High-quality solutions are favored through normalization,
+    \item Extremely low-cost solutions remain competitive even with moderate blood levels.
+\end{itemize}
+
+This creates a balanced selection pressure where both exploration potential and exploitation quality are considered.
+
+
+
+\paragraph{Dynamic Leadership Behavior}
+
+Unlike static leader selection mechanisms, the alpha wolf in the Bloodhound Algorithm evolves dynamically over time. Let $\alpha^{(t)}$ denote the alpha at iteration $t$:
+
+\[
+\alpha^{(t)} = \arg\max_i \mathbf{d}_i^{(t)}
+\]
+
+The evolution of the leader can be described as:
+\[
+\alpha^{(t+1)} =
+\begin{cases}
+\alpha^{(t)}, & \text{if no better dominance is found} \\
+j, & \text{if } \mathbf{d}_j^{(t+1)} > \mathbf{d}_{\alpha}^{(t)}
+\end{cases}
+\]
+
+
+
+\paragraph{Impact on Search Direction}
+
+The alpha selection mechanism directly affects the trajectory of the search process. The population is biased toward regions explored by the alpha wolf, while still maintaining stochastic exploration at the individual level.
+
+This results in a guided search process:
+\[
+S_i^{(t+1)} \sim \mathcal{F}(S_i^{(t)}, S_{\alpha}^{best})
+\]
+
+where $\mathcal{F}(\cdot)$ represents alpha-guided transformations.
+
+
+
+\paragraph{System-Level Interpretation}
+
+The selection of the alpha wolf introduces a hierarchical structure within the population:
+
+\begin{itemize}
+    \item Alpha: primary guide of the search,
+    \item Other wolves: adaptive followers with independent exploration capabilities.
+\end{itemize}
+
+This structure enables the algorithm to combine guided search with unguided exploration, which is really important for effectively searching complex search spaces.
+
+
+\paragraph{Summary}
+
+The proposed alpha selection mechanism extends beyond traditional best-solution selection by using energy dynamics and normalized quality measures into a complete dominance framework. This allows the Bloodhound Algorithm to dynamically adapt its leadership structure, ensuring that the search is guided by agents that are both high-performing and exploration-capable.
+
+\subsection{Alpha-Guided Reconstruction Mechanism}
+
+One of the most distinctive components of the Bloodhound Algorithm is the alpha-guided reconstruction, which serves as the primary intensification strategy of this framework. Unlike classical metaheuristics that rely on crossover operators or purely local modifications, this mechanism introduces a structured and partial inheritance process using the best-performing agent in the population.
+\par
+
+The key idea is to guide the search towards promising regions of the solution space by selectively transferring structural information from the alpha solution, while preserving diversity through controlled disruption.
+\paragraph{Motivation}
+
+In combinatorial optimization problems such as vehicle routing, high-quality solutions often contain valuable structural patterns, such as efficient customer sequences or route partitions. Classical operators attempt to combine entire solutions which often results in infeasibility loss of critical structures.
+\par
+
+On the other hand, purely local search operators are often insufficient to move the solution towards globally promising regions.\par
+
+To overcome these limitations, the Bloodhound Algorithm introduces a \textit{partial reconstruction strategy}, where only selected components of the alpha solution are inherited and integrated to the current solution.
+
+\paragraph{Formal Definition}
+
+Let:
+\[
+S_i = (\mathcal{R}_i, \mathcal{V}_i)
+\]
+be the current solution of wolf $i$, and let:
+\[
+S_{\alpha} = (\mathcal{R}_{\alpha}, \mathcal{V}_{\alpha})
+\]
+be the best solution of the alpha wolf.
+
+Let $\mathcal{C}$ denote the set of all customers. A subset of customers is selected for inheritance:
+\[
+\mathcal{C}_{\text{sel}} \subseteq \mathcal{C}
+\]
+
+such that:
+\[
+|\mathcal{C}_{\text{sel}}| = \max \left(1, \left\lfloor \rho \cdot |\mathcal{C}| \right\rfloor \right)
+\]
+
+where $\rho \in (0,1)$ is the inheritance fraction parameter.
+
+\paragraph{Customer Removal (Ruin Phase)}
+
+The selected customers are removed from the current solution:
+\[
+\mathcal{R}_i' = \mathcal{R}_i \setminus \mathcal{C}_{\text{sel}}
+\]
+
+This produces a reduced solution:
+\[
+S_i' = (\mathcal{R}_i', \mathcal{V}_i')
+\]
+\paragraph{Route Reassignment}
+
+For each remaining route $R_r \in \mathcal{R}_i'$, a new vehicle is selected to minimize cost:
+
+\[
+v_r = \arg\min_{k \in \mathcal{K}} C(R_r, k)
+\]
+
+subject to:
+\[
+\sum_{j \in R_r} d_j \leq Q_k
+\]
+
+\paragraph{Alpha-Based Grouping}
+
+The selected customers are grouped according to their positions in the alpha solution:
+
+\[
+\mathcal{G}_k = \{ i \in \mathcal{C}_{\text{sel}} \mid i \in R_k^{\alpha} \}
+\]
+
+This preserves structural patterns from the alpha solution.
+
+\paragraph{Guided Insertion}
+
+Each customer is reinserted into the reduced solution by minimizing insertion cost.
+
+For a route $R_r$ and insertion position $p$:
+\[
+\Delta_{insert} =
+d_{i_{p-1},c} + d_{c,i_p} - d_{i_{p-1},i_p}
+\]
+
+The best insertion is defined as:
+\[
+(r^*, p^*) = \arg\min_{r,p} \Delta_{insert}
+\]
+
+subject to feasibility:
+\[
+\sum_{j \in R_r} d_j + d_c \leq Q_{v_r}
+\]
+
+\paragraph{Fallback Mechanism}
+
+If no feasible insertion exists, a new route is created:
+
+\[
+R_{new} = (0, c, 0)
+\]
+
+with vehicle assignment:
+\[
+v_{new} = \arg\min_{k \in \mathcal{K}} C(R_{new}, k)
+\]
+
+\paragraph{Reconstruction Operator}
+
+The complete reconstruction can be expressed as:
+
+\[
+S_i^{new} = \mathcal{R}_{\alpha\text{-guided}}(S_i, S_{\alpha}, \rho)
+\]
+
+---
+
+\paragraph{Iterative Refinement}
+
+To further improve the reconstructed solution, a secondary refinement step is applied:
+
+\[
+S_i^{(k+1)} = \mathcal{R}_{\text{ruin-rebuild}}(S_i^{(k)})
+\]
+
+for $k = 1, \dots, K$ iterations.
+
+\paragraph{Interpretation}
+
+The alpha-guided reconstruction mechanism introduces a hybrid search behavior:
+
+\begin{itemize}
+    \item Global guidance through alpha-based structure transfer,
+    \item Local refinement through cost-based insertion,
+    \item Controlled diversification through partial destruction.
+\end{itemize}
+
+\paragraph{Impact on Search Behavior}
+
+This mechanism significantly enhances intensification by directing the search towards high-quality regions while maintaining sufficient diversity. Unlike classical crossover operators, which often disrupt feasibility, the proposed approach ensures that all insertions are feasibility-preserving.
+
+\paragraph{Summary}
+
+The alpha-guided reconstruction mechanism provides a powerful intensification strategy that combines structural inheritance, adaptive insertion and feasibility-preserving optimization. This enables the algorithm to effectively refine promising regions of the solution space while avoiding premature convergence.
+
+\subsection{Ruin-and-Rebuild Intensification Strategy}
+
+Following the alpha-guided reconstruction phase, the Bloodhound Algorithm applies an additional intensification mechanism referred to as \textit{ruin-and-rebuild strategy}. This phase is designed to perform deep structural modifications on candidate solutions in order to escape plateaus and refine promising regions of the search space.\par
+
+Unlike local search operators that perform incremental modifications, the ruin-and-rebuild strategy uses controlled destruction followed by systematic construction, enabling the algorithm to further explore alternative sequences that are not reachable through small perturbations.
+
+\paragraph{Motivation}
+
+In large scale routing problems, many high quality solutions differ significantly in their structure rather than minor changes. As a result, traditional operators may fail to transition between structurally distinct high-quality regions.\par
+
+The ruin-and-rebuild strategy addresses these limitations by temporarily removing a subset of customers and reinserting them in a cost-aware manner, effectively enabling large jumps in the solution space.
+
+\paragraph{Customer Removal (Ruin Phase)}
+
+Let:
+\[
+S = (\mathcal{R}, \mathcal{V})
+\]
+
+be a given solution. Let $\mathcal{C}$ denote the set of customers. A subset of customers is selected randomly:
+
+\[
+\mathcal{C}_{\text{rem}} \subseteq \mathcal{C}
+\]
+
+such that:
+\[
+|\mathcal{C}_{\text{rem}}| = \max \left(1, \left\lfloor \eta \cdot |\mathcal{C}| \right\rfloor \right)
+\]
+
+where $\eta \in (0,1)$ is the ruin fraction.
+
+The reduced solution is obtained as:
+\[
+\mathcal{R}' = \mathcal{R} \setminus \mathcal{C}_{\text{rem}}
+\]
+
+\paragraph{Vehicle Reassignment}
+
+After removal, each remaining route is reassigned to the most cost-effective feasible vehicle:
+
+\[
+v_r = \arg\min_{k \in \mathcal{K}} C(R_r, k)
+\]
+
+subject to:
+\[
+\sum_{i \in R_r} d_i \leq Q_k
+\]
+
+\paragraph{Reinsertion Mechanism}
+
+Customers are reinserted sequentially into the reduced solution. Let $c \in \mathcal{C}_{\text{rem}}$. For each route $R_r$ and insertion position $p$, the insertion cost is:
+
+\[
+\Delta_{r,p}(c) = d_{i_{p-1},c} + d_{c,i_p} - d_{i_{p-1},i_p}
+\]
+
+The best feasible insertion is determined as:
+\[
+(r^*, p^*) = \arg\min_{r,p} \Delta_{r,p}(c)
+\]
+
+subject to:
+\[
+\sum_{i \in R_r} d_i + d_c \leq Q_{v_r}
+\]
+
+\paragraph{Fallback Route Creation}
+
+If no feasible insertion exists, a new route is created:
+
+\[
+R_{\text{new}} = (0, c, 0)
+\]
+
+with vehicle selection:
+\[
+v_{\text{new}} = \arg\min_{k \in \mathcal{K}} C(R_{\text{new}}, k)
+\]
+
+\paragraph{Reconstruction Operator}
+
+The ruin-and-rebuild transformation can be expressed as:
+
+\[
+S' = \mathcal{R}_{\text{RR}}(S, \eta)
+\]
+
+where $\mathcal{R}_{\text{RR}}(\cdot)$ denotes the ruin-and-rebuild operator.
+
+\paragraph{Iterative Intensification}
+
+To further enhance solution quality, the process is applied iteratively:
+
+\[
+S^{(k+1)} = \mathcal{R}_{\text{RR}}(S^{(k)}, \eta), \quad k = 1, \dots, K
+\]
+
+where $K$ is the number of refinement iterations.
+
+\paragraph{Search Space Expansion}
+
+The ruin-and-rebuild mechanism expands the reachable solution space beyond classical neighborhoods:
+
+\[
+\mathcal{N}_{\text{RR}}(S) \supset \mathcal{N}_{\text{local}}(S)
+\]
+
+This allows the algorithm to explore configurations that require simultaneous multi-customer relocation.
+
+\paragraph{Interaction with Alpha Guidance}
+
+When combined with the alpha-guided reconstruction phase, the overall intensification process can be expressed as:
+
+\[
+S_i^{new} = \mathcal{R}_{\text{RR}} \left( \mathcal{R}_{\alpha}(S_i, S_{\alpha}) \right)
+\]
+
+This two-stage transformation ensures both directional guidance and deep structural optimization.
+
+\paragraph{Interpretation}
+
+The ruin-and-rebuild strategy introduces the following advantages:
+
+\begin{itemize}
+    \item Enables large-scale structural modifications,
+    \item Escapes local minima unreachable by small perturbations,
+    \item Preserves feasibility through controlled insertion,
+    \item Enhances solution diversity while maintaining quality.
+\end{itemize}
+
+\paragraph{Summary}
+
+The ruin-and-rebuild intensification mechanism provides a powerful tool for deep search within promising regions. By combining controlled destruction with cost-based reconstruction, the Bloodhound Algorithm achieves a level both robustness and flexibility that surpasses traditional local search methods.
+
+\subsection{Region-Based Memory and Structural Similarity Penalization}
+
+One of the main challenges in metaheuristic optimization is preventing the process from revisiting previously explored regions of the solution space. Classical approaches like Tabu Search addresses this issue by maintaining a short-term memory of recently visited solutions or moves. However these methods typically operate at a local level and fail to capture the broader characteristics of solutions.\par
+
+To overcome this limitation, the Bloodhound Algorithm introduces a \textit{region-based memory mechanism}, where previously explored solutions are represented through their structural signatures and stored as abstract regions in the search space.
+
+\paragraph{Motivation}
+
+In combinatorial routing problems, different solutions may share significant similarities, even if they differ in node ordering. Revisiting such similar solutions leads to redundant exploration and wasted computational effort.\par
+
+Therefore, instead of tracking exact solutions, this algorithm captures the \textit{structural essence} of solutions through edge-based representations, enabling a more general and robust memory mechanism.
+
+\paragraph{Edge-Based Solution Representation}
+
+Each solution $S$ is mapped to an edge set:
+\[
+E(S) = \{ (i,j) \mid (i,j) \text{ appears consecutively in any route of } S \}
+\]
+
+To ensure uniqueness of edges:
+\[
+e_{ij} =
+\begin{cases}
+(i,j), & i < j \\
+(j,i), & \text{otherwise}
+\end{cases}
+\]
+
+Thus, the edge representation becomes order-independent.
+
+\paragraph{Region Definition}
+
+A region is defined as an edge signature corresponding to a previously explored solution:
+\[
+\mathcal{R} = \{E_1, E_2, \dots, E_m\}
+\]
+
+where each $E_k$ represents a structurally significant solution encountered during the search.
+
+\paragraph{Similarity Measure}
+
+Given a candidate solution $S'$ and a stored region $E_k$, the structural similarity is defined as:
+
+\[
+\text{sim}(S', E_k) = \frac{|E(S') \cap E_k|}{|E_k|}
+\]
+
+The overall similarity with respect to all regions is:
+\[
+\text{sim}(S', \mathcal{R}) = \max_{E_k \in \mathcal{R}} \text{sim}(S', E_k)
+\]
+
+\paragraph{Penalty Integration}
+
+The similarity measure is incorporated into the acceptance mechanism through a penalty term:
+
+\[
+\Delta_{\text{eff}} = \hat{\Delta} + \lambda \cdot \text{sim}(S', \mathcal{R})
+\]
+
+where:
+\begin{itemize}
+    \item $\hat{\Delta}$ is the scaled cost difference,
+    \item $\lambda$ is the penalization coefficient.
+\end{itemize}
+
+This formulation increases the effective cost of solutions that resemble previously explored regions.
+
+\paragraph{Region Update Mechanism}
+
+After each intensification phase, the best solution $S^*$ obtained during the hunt is added to the memory:
+
+\[
+\mathcal{R} \leftarrow \mathcal{R} \cup \{E(S^*)\}
+\]
+
+Thus, the region set evolves over time:
+\[
+\mathcal{R}^{(t+1)} = \mathcal{R}^{(t)} \cup \{E(S^*_{t})\}
+\]
+
+\paragraph{Interpretation as Search Space Partitioning}
+
+The region-based memory can be interpreted as a partitioning of the search space into explored and unexplored regions. Let $\Omega$ denote the entire solution space:
+
+\[
+\Omega = \Omega_{\text{explored}} \cup \Omega_{\text{unexplored}}
+\]
+
+The region set $\mathcal{R}$ approximates $\Omega_{\text{explored}}$:
+\[
+\Omega_{\text{explored}} \approx \bigcup_{k=1}^{m} E_k
+\]
+
+\paragraph{Avoidance of Cycling Behavior}
+
+By penalizing structurally similar solutions, the algorithm avoids cycling behavior:
+
+\[
+P(\text{return to same region}) \to 0 \quad \text{as } \text{sim}(S', \mathcal{R}) \to 1
+\]
+
+This ensures that the search process continuously progresses toward new areas of the solution space.
+
+\paragraph{Interaction with Acceptance Mechanism}
+
+The region-based penalty directly affects the acceptance probability:
+
+\[
+P = \exp\left(-a \cdot (\Delta_{\text{eff}})^b \right)
+\]
+
+Thus, even if a solution has a small cost increase, it may still be rejected if it belongs to an already explored region.
+
+\paragraph{Memory Growth Dynamics}
+
+The size of the region set evolves as:
+\[
+|\mathcal{R}^{(t)}| = t
+\]
+
+which introduces a gradually increasing exploration pressure over time.
+
+\paragraph{Interpretation}
+
+The region-based memory mechanism introduces a form of long-term memory that captures structural patterns rather than exact solutions. This provides several advantages:
+
+\begin{itemize}
+    \item Prevents unnecessary exploration of similar solutions,
+    \item Encourages diversification at a structural level,
+    \item Maintains flexibility by allowing partial similarity,
+    \item Integrates seamlessly with the probabilistic acceptance mechanism.
+\end{itemize}
+
+\paragraph{Summary}
+
+The region-based memory mechanism transforms the process into a progressively strengthening exploration of the solution space. By penalizing structural similarity, the Bloodhound Algorithm effectively ensures continuous discovery of new solution regions. This significantly enhances its performance in large-scale optimization problems. 
+
+\subsection{Full Algorithmic Framework}
+
+The Bloodhound Algorithm operates as a multi-phase, population-based framework that combines stochastic exploration, energy-based acceptance, structured intensification and region-based memory into a unified optimization process. \par
+
+The proposed framework alternates between distinct phases, each responsible for a specific aspect of the search dynamics. This structure enables the algorithm to maintain balance between exploration and exploitation while dynamically adapting to the evolving state of the search process.
+
+\paragraph{High-Level Framework}
+
+Let $\mathcal{P}^{(t)} = \{W_1^{(t)}, W_2^{(t)}, \dots, W_n^{(t)}\}$ denote the population of wolves at iteration $t$. Each iteration consists of the following phases:
+
+\begin{enumerate}
+    \item Initialization,
+    \item Exploration (Free Search),
+    \item Alpha Selection,
+    \item Intensification (Hunt Phase),
+    \item Region Update,
+    \item Population Update.
+\end{enumerate}
+
+\paragraph{Initialization}
+
+The initial population is generated using a feasibility-preserving constructive procedure:
+
+\[
+W_i^{(0)} = \left( S_i^{(0)}, S_i^{(0)}, B_0, q_i^{(0)} \right)
+\]
+
+where:
+\begin{itemize}
+    \item $S_i^{(0)}$ is a feasible initial solution,
+    \item $B_0$ is the initial blood level,
+    \item $q_i^{(0)}$ is computed via normalization.
+\end{itemize}
+
+\paragraph{Exploration Phase}
+
+During exploration, each wolf performs stochastic transitions:
+
+\[
+S_i^{(t+1)} = \mathcal{A}\left( \mathcal{N}_k(S_i^{(t)}) \right)
+\]
+
+where:
+\begin{itemize}
+    \item $\mathcal{N}_k(\cdot)$ is a randomly selected neighborhood operator,
+    \item $\mathcal{A}(\cdot)$ is the blood-based acceptance function.
+\end{itemize}
+
+This phase is repeated for a fixed number of iterations:
+\[
+t = 1, \dots, T_{\text{explore}}
+\]
+
+\paragraph{Alpha Selection}
+
+After exploration, the alpha wolf is selected:
+
+\[
+\alpha = \arg\max_i (B_i, q_i, -f(S_i^{best}))
+\]
+
+This defines the leader that guides the intensification phase.
+
+\paragraph{Hunt Phase}
+
+Each wolf is guided toward the alpha solution:
+
+\[
+S_i' = \mathcal{R}_{\alpha}(S_i, S_{\alpha})
+\]
+
+followed by iterative refinement:
+
+\[
+S_i^{(k+1)} = \mathcal{R}_{\text{RR}}(S_i^{(k)})
+\]
+
+The best solution obtained during this phase is:
+
+\[
+S_{\text{hunt}}^* = \arg\min_i f(S_i')
+\]
+
+\paragraph{Global Best Update}
+
+The global best solution is updated as:
+
+\[
+S^{*} =
+\begin{cases}
+S_{\text{hunt}}^*, & \text{if } f(S_{\text{hunt}}^*) < f(S^{*}) \\
+S^{*}, & \text{otherwise}
+\end{cases}
+\]
+
+\paragraph{Region Memory Update}
+
+The best solution from the hunt phase is stored as a new region:
+
+\[
+\mathcal{R}^{(t+1)} = \mathcal{R}^{(t)} \cup \{E(S_{\text{hunt}}^*)\}
+\]
+
+\paragraph{Blood Reset Mechanism}
+
+At the beginning of each hunt cycle, blood levels are reset:
+
+\[
+B_i^{(t)} = B_0
+\]
+
+This prevents excessive accumulation and maintains controlled exploration.
+
+\paragraph{Full Iterative Process}
+
+The complete algorithm can be expressed as:
+
+\[
+\mathcal{P}^{(t+1)} =
+\mathcal{U}\Big(
+\mathcal{H}\big(
+\mathcal{E}(\mathcal{P}^{(t)})
+\big)
+\Big)
+\]
+
+where:
+\begin{itemize}
+    \item $\mathcal{E}$ is the exploration operator,
+    \item $\mathcal{H}$ is the hunt operator,
+    \item $\mathcal{U}$ is the update mechanism.
+\end{itemize}
+
+
+
+
+
+
+\paragraph{Computational Structure}
+
+The computational complexity of the algorithm can be approximated as:
+
+\[
+\mathcal{O}(H \cdot N \cdot T_{\text{explore}} \cdot |\mathcal{N}| + H \cdot N \cdot K \cdot |\mathcal{C}|)
+\]
+
+where:
+\begin{itemize}
+    \item $H$ is the number of hunt cycles,
+    \item $N$ is the number of wolves,
+    \item $|\mathcal{N}|$ is the neighborhood size,
+    \item $K$ is the number of ruin-rebuild iterations,
+    \item $|\mathcal{C}|$ is the number of customers.
+\end{itemize}
+
+\subsection{Pseudo-code}
+
+\begin{algorithm}[htbp]
+\caption{Bloodhound Algorithm for HCVRP}
+\label{alg:bloodhound}
+\begin{algorithmic}[1]
+\State Initialize population $\mathcal{P}$
+\State Initialize region memory $\mathcal{R} \gets \emptyset$
+\State Determine global best solution $S^*$
+\For{$h = 1$ to $H$}
+    \State Reset blood levels for all wolves
+    \For{$t = 1$ to $T_{\text{explore}}$}
+        \For{each wolf $W_i$}
+            \State Generate candidate $S_i' \sim \mathcal{N}(S_i)$
+            \State Apply blood-based acceptance
+        \EndFor
+        \State Update quality scores
+    \EndFor
+    \State Select alpha wolf $\alpha$
+    \For{each wolf $W_i \neq \alpha$}
+        \State $S_i' \gets \mathcal{R}_{\alpha}(S_i, S_{\alpha})$
+        \State Apply ruin-and-rebuild refinement
+        \State Update $S_i$ and $S_i^{best}$
+    \EndFor
+    \State Update global best solution $S^*$
+    \State Update region memory $\mathcal{R}$
+\EndFor
+\State \Return $S^*$
+\end{algorithmic}
+\end{algorithm}
+
+

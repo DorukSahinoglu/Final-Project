@@ -1,5 +1,6 @@
 import type {
   GeocodeResponse,
+  GoogleSettingsResponse,
   HealthResponse,
   JobAcceptedResponse,
   JobResponse,
@@ -71,4 +72,10 @@ export const api = {
   getJob: (jobId: string) => request<JobResponse>(`/jobs/${jobId}`),
   cancelJob: (jobId: string) => request<{ message: string }>(`/jobs/${jobId}/cancel`, { method: "POST" }),
   getSolution: (solutionId: string) => request<SolutionResponse>(`/solutions/${solutionId}`),
+  getGoogleSettings: () => request<GoogleSettingsResponse>("/settings/google"),
+  updateGoogleSettings: (googleApiKey: string) =>
+    request<GoogleSettingsResponse>("/settings/google", {
+      method: "PUT",
+      body: JSON.stringify({ google_api_key: googleApiKey }),
+    }),
 };

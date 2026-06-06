@@ -1,6 +1,8 @@
 import random
 import math
 import heapq
+import json
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from dataclasses import dataclass, field
@@ -567,6 +569,9 @@ class HCVRPProblem:
     vehicles:      List[Vehicle]
     time_windows:  Optional[List[Tuple[float, float]]] = None
     service_times: Optional[List[float]]               = None
+    distance_matrix: Optional[Distance_matrix]         = None
+    time_matrix: Optional[Distance_matrix]             = None
+    max_route_time_min: Optional[float]                = None
     dist:          Distance_matrix                     = field(init=False)
     n_nodes:       int                                 = field(init=False)
     customer_ids:  List[int]                           = field(init=False)
@@ -593,7 +598,11 @@ class HCVRPProblem:
         elif len(self.service_times) != self.n_nodes:
             raise ValueError("service_times uzunlugu node sayisi ile ayni olmali")
 
-        self.dist = self.build_tsplib_euc2d_matrix(self.coords)
+        self.dist = (
+            [[float(x) for x in row] for row in self.distance_matrix]
+            if self.distance_matrix is not None
+            else self.build_tsplib_euc2d_matrix(self.coords)
+        )
         self.granular_neighbors = self._build_granular_neighbors(
             int(ALGO_CONFIG["granular_neighbor_k"])
         )
@@ -660,6 +669,8 @@ class HCVRPProblem:
         return total
 
     def travel_time(self, from_node: int, to_node: int, vehicle: VehicleType) -> float:
+        if self.time_matrix is not None:
+            return float(self.time_matrix[from_node][to_node])
         if vehicle.speed <= 0:
             raise ValueError("Vehicle speed pozitif olmali")
         if NUMBA_AVAILABLE and np is not None:
@@ -930,6 +941,10 @@ def materialize_vehicle_ids(problem: HCVRPProblem, type_ids: List[int]) -> List[
 
 
 def build_bloodhound_vrp_style_output(problem: HCVRPProblem, best_state: "SolutionState") -> Dict:
+    output_node_ids = getattr(problem, "output_node_ids", None)
+    routes = [route[:] for route in best_state.routes]
+    if isinstance(output_node_ids, list) and len(output_node_ids) == problem.n_nodes:
+        routes = [[int(output_node_ids[node]) for node in route] for route in best_state.routes]
     return {
         "Feasible": bool(best_state.feasible),
         "Total cost": round(float(best_state.total_cost), 4),
@@ -938,8 +953,123 @@ def build_bloodhound_vrp_style_output(problem: HCVRPProblem, best_state: "Soluti
         "Route distances": best_state.route_distances[:],
         "Route times": best_state.route_times[:],
         "Route costs": best_state.route_costs[:],
-        "Routes": [route[:] for route in best_state.routes],
+        "Routes": routes,
     }
+
+
+def build_problem_from_app_payload(payload: Dict) -> Tuple[HCVRPProblem, Dict]:
+    locations = payload.get("locations")
+    distance_matrix = payload.get("distance_matrix")
+    time_matrix = payload.get("time_matrix")
+    demands_rows = payload.get("demands", [])
+    fleet_rows = payload.get("fleet", [])
+
+    if not isinstance(locations, list) or not locations:
+        raise ValueError("locations gerekli.")
+    if not isinstance(distance_matrix, list) or not distance_matrix:
+        raise ValueError("distance_matrix gerekli.")
+    if not isinstance(time_matrix, list) or not time_matrix:
+        raise ValueError("time_matrix gerekli.")
+    if not isinstance(fleet_rows, list) or not fleet_rows:
+        raise ValueError("fleet gerekli.")
+
+    n_nodes = len(locations)
+    if len(distance_matrix) != n_nodes or any(len(row) != n_nodes for row in distance_matrix):
+        raise ValueError("distance_matrix boyutu locations ile ayni olmali.")
+    if len(time_matrix) != n_nodes or any(len(row) != n_nodes for row in time_matrix):
+        raise ValueError("time_matrix boyutu locations ile ayni olmali.")
+
+    coords: List[Point] = []
+    node_ids: List[int] = []
+    for idx, row in enumerate(locations):
+        node_ids.append(int(row.get("node_id", idx)))
+        lat = row.get("lat")
+        lon = row.get("lon")
+        coords.append((float(lat) if lat is not None else float(idx), float(lon) if lon is not None else 0.0))
+
+    demand_map = {int(row.get("node_id")): float(row.get("demand", 0.0)) for row in demands_rows}
+    demands = [0.0] * n_nodes
+    for idx, row in enumerate(locations):
+        if bool(row.get("is_depot", False)):
+            demands[idx] = 0.0
+        else:
+            demands[idx] = float(demand_map.get(node_ids[idx], row.get("demand", 0.0)))
+    if demands:
+        demands[0] = 0.0
+
+    tw_map = {
+        int(row.get("node_id")): (float(row.get("start_min", 0.0)), float(row.get("end_min", float("inf"))))
+        for row in payload.get("time_windows", [])
+    }
+    time_windows: List[Tuple[float, float]] = []
+    for idx, row in enumerate(locations):
+        if node_ids[idx] in tw_map:
+            time_windows.append(tw_map[node_ids[idx]])
+        else:
+            time_windows.append((float(row.get("time_window_start_min", 0.0)),
+                                 float(row.get("time_window_end_min", float("inf")))))
+
+    service_map = {
+        int(row.get("node_id")): float(row.get("duration_min", 0.0))
+        for row in payload.get("service_times", [])
+    }
+    service_times = [
+        float(service_map.get(node_ids[idx], row.get("service_time_min", 0.0)))
+        for idx, row in enumerate(locations)
+    ]
+
+    vehicles: List[Vehicle] = []
+    vehicle_id = 0
+    output_fleet: List[Dict] = []
+    for row in fleet_rows:
+        count = int(row.get("count", 1))
+        capacity = float(row.get("capacity", 0.0))
+        fixed_cost = float(row.get("fixed_cost", 0.0))
+        cost_per_km = float(row.get("cost_per_km", 0.0))
+        speed = float(row.get("speed_kmh", 1.0) or 1.0)
+        for _ in range(count):
+            vehicles.append(
+                Vehicle(
+                    vehicle_id=vehicle_id,
+                    capacity=capacity,
+                    cost_per_km=cost_per_km,
+                    fixed_cost=fixed_cost,
+                    speed=speed,
+                )
+            )
+            vehicle_id += 1
+        output_fleet.append(
+            {
+                "vehicle_type_id": row.get("vehicle_type_id"),
+                "label": row.get("label"),
+                "count": count,
+                "capacity": capacity,
+                "fixed_cost": fixed_cost,
+                "cost_per_km": cost_per_km,
+                "speed_kmh": speed,
+            }
+        )
+
+    solver_config = payload.get("solver_config") or {}
+    solver_params = solver_config.get("params") if isinstance(solver_config, dict) else {}
+    max_route_time_min = None
+    if isinstance(solver_params, dict):
+        raw_limit = solver_params.get("max_route_time_min")
+        if raw_limit is not None:
+            max_route_time_min = float(raw_limit)
+
+    problem = HCVRPProblem(
+        coords=coords,
+        demands=demands,
+        vehicles=vehicles,
+        time_windows=time_windows,
+        service_times=service_times,
+        distance_matrix=[[float(x) for x in row] for row in distance_matrix],
+        time_matrix=[[float(x) for x in row] for row in time_matrix],
+        max_route_time_min=max_route_time_min,
+    )
+    problem.output_node_ids = node_ids  # type: ignore[attr-defined]
+    return problem, {"locations": locations, "fleet": output_fleet, "solver_config": solver_config}
 
 def route_has_duplicate_customer(route: Route) -> bool:
     customers = route_core(route)
@@ -4137,19 +4267,29 @@ if __name__ == "__main__":
         "so_enforce_period":     None,
     }
 
-    DATASET_DIR  = Path(__file__).resolve().parent / "Test_data"
-    DATASET_FILE = DATASET_DIR / "X200-HD.txt"
+    input_path = Path(sys.argv[1]) if len(sys.argv) > 1 else None
+    if input_path is not None and input_path.suffix.lower() == ".json":
+        print(f"Veri dosyasi: {input_path.name}")
+        payload = json.loads(input_path.read_text(encoding="utf-8"))
+        problem, app_meta = build_problem_from_app_payload(payload)
+        solver_config = app_meta.get("solver_config", {})
+        solver_params = solver_config.get("params") if isinstance(solver_config, dict) else None
+        if isinstance(solver_params, dict):
+            SEARCH_PARAMS.update(solver_params)
+    else:
+        DATASET_DIR  = Path(__file__).resolve().parent / "Test_data"
+        DATASET_FILE = input_path if input_path is not None else (DATASET_DIR / "X200-HD.txt")
 
-    if (not DATASET_FILE.exists()) or DATASET_FILE.stat().st_size == 0:
-        fallback_files = sorted(
-            [path for path in DATASET_DIR.glob("*.txt") if path.stat().st_size > 0]
-        )
-        if not fallback_files:
-            raise ValueError("Test_data icinde kullanilabilir dolu bir dataset yok.")
-        DATASET_FILE = fallback_files[0]
+        if (not DATASET_FILE.exists()) or DATASET_FILE.stat().st_size == 0:
+            fallback_files = sorted(
+                [path for path in DATASET_DIR.glob("*.txt") if path.stat().st_size > 0]
+            )
+            if not fallback_files:
+                raise ValueError("Test_data icinde kullanilabilir dolu bir dataset yok.")
+            DATASET_FILE = fallback_files[0]
 
-    print(f"Veri dosyasi: {DATASET_FILE.name}")
-    problem = load_hfvrp_instance_from_vrplib(DATASET_FILE)
+        print(f"Veri dosyasi: {DATASET_FILE.name}")
+        problem = load_hfvrp_instance_from_vrplib(DATASET_FILE)
 
     best_state = run_bloodhound_hcvrp(problem=problem, **SEARCH_PARAMS)
     final_output = build_bloodhound_vrp_style_output(problem, best_state)

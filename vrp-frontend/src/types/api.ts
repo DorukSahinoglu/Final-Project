@@ -132,3 +132,9 @@ export type SolutionResponse = {
   raw_payload: Record<string, unknown>;
   created_at: string;
 };
+
+export type GoogleSettingsResponse = {
+  google_api_key?: string | null;
+  geocode_provider: string;
+  matrix_provider: string;
+};
