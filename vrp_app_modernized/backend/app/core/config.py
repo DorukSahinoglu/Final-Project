@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     geocoder_user_agent: str = "PulseRoute-Local/1.0"
     nominatim_base_url: str = "https://nominatim.openstreetmap.org"
     osrm_base_url: str = "https://router.project-osrm.org"
+    osrm_table_chunk_size: int = 40
 
 
 @lru_cache(maxsize=1)

@@ -4332,7 +4332,7 @@ if __name__ == "__main__":
     if isinstance(user_solver_params, dict):
         solver_params.update(user_solver_params)
 
-    trace_every = int(payload.get("trace_every", 10))
+    trace_every = int(payload.get("trace_every", 1))
     collector = OutputTraceCollector(addresses=addresses, vehicles=vehicles, sample_every=trace_every)
 
     best_state = run_bloodhound_hcvrp(

@@ -25,6 +25,7 @@ class MatrixService:
         self._validate_coordinates(addresses)
         size = len(addresses)
         distance_matrix, time_matrix = self._build_osrm_matrix(addresses)
+        generation_mode = "single_request" if size <= self.settings.osrm_table_chunk_size else "batched_blocks"
 
         return self._store_matrix(
             project=project,
@@ -36,6 +37,7 @@ class MatrixService:
                 "source": "osrm",
                 "unit_distance": "km",
                 "unit_time": "minutes",
+                "generation_mode": generation_mode,
             },
         )
 
@@ -75,32 +77,100 @@ class MatrixService:
         )
 
     def _build_osrm_matrix(self, addresses: list[models.Address]) -> tuple[list[list[float]], list[list[float]]]:
+        if len(addresses) > self.settings.osrm_table_chunk_size:
+            return self._build_osrm_matrix_batched(addresses)
+        return self._build_osrm_matrix_single(addresses)
+
+    def _build_osrm_matrix_single(self, addresses: list[models.Address]) -> tuple[list[list[float]], list[list[float]]]:
         coordinates = ";".join(f"{item.longitude},{item.latitude}" for item in addresses)
         params = {"annotations": "distance,duration"}
         osrm_table_url = f"{self.settings.osrm_base_url.rstrip('/')}/table/v1/driving/{coordinates}"
+        payload = self._request_osrm_table(osrm_table_url, params, request_label=f"{len(addresses)}x{len(addresses)} full matrix")
+        return self._extract_osrm_matrices(payload, expected_rows=len(addresses), expected_cols=len(addresses), label="OSRM full matrix")
+
+    def _build_osrm_matrix_batched(self, addresses: list[models.Address]) -> tuple[list[list[float]], list[list[float]]]:
+        size = len(addresses)
+        chunk_size = max(1, int(self.settings.osrm_table_chunk_size))
+        distance_matrix = [[0.0] * size for _ in range(size)]
+        time_matrix = [[0.0] * size for _ in range(size)]
+
+        for source_start in range(0, size, chunk_size):
+            source_end = min(size, source_start + chunk_size)
+            source_addresses = addresses[source_start:source_end]
+            for destination_start in range(0, size, chunk_size):
+                destination_end = min(size, destination_start + chunk_size)
+                destination_addresses = addresses[destination_start:destination_end]
+                block_distance, block_time = self._request_osrm_block(source_addresses, destination_addresses)
+                for source_offset, row in enumerate(block_distance):
+                    for destination_offset, value in enumerate(row):
+                        distance_matrix[source_start + source_offset][destination_start + destination_offset] = value
+                        time_matrix[source_start + source_offset][destination_start + destination_offset] = block_time[source_offset][destination_offset]
+
+        return distance_matrix, time_matrix
+
+    def _request_osrm_block(
+        self,
+        source_addresses: list[models.Address],
+        destination_addresses: list[models.Address],
+    ) -> tuple[list[list[float]], list[list[float]]]:
+        same_block = source_addresses is destination_addresses or source_addresses == destination_addresses
+        if same_block:
+            coordinates_list = [f"{item.longitude},{item.latitude}" for item in source_addresses]
+            source_indices = list(range(len(source_addresses)))
+            destination_indices = list(range(len(source_addresses)))
+        else:
+            coordinates_list = [f"{item.longitude},{item.latitude}" for item in source_addresses] + [
+                f"{item.longitude},{item.latitude}" for item in destination_addresses
+            ]
+            source_indices = list(range(len(source_addresses)))
+            destination_indices = list(range(len(source_addresses), len(coordinates_list)))
+
+        coordinates = ";".join(coordinates_list)
+        params = {
+            "annotations": "distance,duration",
+            "sources": ";".join(str(index) for index in source_indices),
+            "destinations": ";".join(str(index) for index in destination_indices),
+        }
+        osrm_table_url = f"{self.settings.osrm_base_url.rstrip('/')}/table/v1/driving/{coordinates}"
+        payload = self._request_osrm_table(
+            osrm_table_url,
+            params,
+            request_label=f"{len(source_addresses)}x{len(destination_addresses)} block",
+        )
+        return self._extract_osrm_matrices(
+            payload,
+            expected_rows=len(source_addresses),
+            expected_cols=len(destination_addresses),
+            label="OSRM matrix block",
+        )
+
+    def _request_osrm_table(self, url: str, params: dict, *, request_label: str) -> dict:
         try:
             with httpx.Client(timeout=30.0) as client:
-                response = client.get(osrm_table_url, params=params)
+                response = client.get(url, params=params)
                 response.raise_for_status()
-                payload = response.json()
         except httpx.HTTPError as exc:
-            logger.warning("OSRM matrix request failed for project coordinates: %s", exc)
-            raise ValueError(f"OSRM matrix request failed: {exc}") from exc
+            logger.warning("OSRM matrix request failed for %s: %s", request_label, exc)
+            raise ValueError(f"OSRM matrix request failed for {request_label}: {exc}") from exc
+        return response.json()
 
+    def _extract_osrm_matrices(self, payload: dict, *, expected_rows: int, expected_cols: int, label: str) -> tuple[list[list[float]], list[list[float]]]:
         if payload.get("code") != "Ok":
-            raise ValueError(f"OSRM matrix generation failed: {payload.get('message') or payload.get('code') or 'unknown error'}")
+            raise ValueError(f"{label} generation failed: {payload.get('message') or payload.get('code') or 'unknown error'}")
 
         distances = payload.get("distances")
         durations = payload.get("durations")
         if not isinstance(distances, list) or not isinstance(durations, list):
-            raise ValueError("OSRM response did not include both distances and durations matrices.")
+            raise ValueError(f"{label} response did not include both distances and durations matrices.")
 
-        self._validate_square_matrix(distances, "distance_matrix")
-        self._validate_square_matrix(durations, "time_matrix")
-        if len(distances) != len(addresses) or len(durations) != len(addresses):
+        self._validate_numeric_matrix(distances, "distance_matrix")
+        self._validate_numeric_matrix(durations, "time_matrix")
+        if len(distances) != expected_rows or len(durations) != expected_rows:
             raise ValueError(
-                f"OSRM matrix size mismatch. Expected {len(addresses)} rows but received {len(distances)} distance rows and {len(durations)} time rows."
+                f"{label} row mismatch. Expected {expected_rows} rows but received {len(distances)} distance rows and {len(durations)} time rows."
             )
+        if any(len(row) != expected_cols for row in distances) or any(len(row) != expected_cols for row in durations):
+            raise ValueError(f"{label} column mismatch. Expected {expected_cols} columns in every row.")
 
         distance_matrix = [
             [round(float(value) / 1000.0, 3) for value in row]
@@ -165,9 +235,17 @@ class MatrixService:
         if not matrix:
             raise ValueError(f"{field_name} cannot be empty.")
         size = len(matrix)
+        self._validate_numeric_matrix(matrix, field_name)
         for row_index, row in enumerate(matrix):
             if len(row) != size:
                 raise ValueError(f"{field_name} must be square. Row {row_index} has length {len(row)} instead of {size}.")
+
+    def _validate_numeric_matrix(self, matrix: list[list[float]], field_name: str) -> None:
+        if not matrix:
+            raise ValueError(f"{field_name} cannot be empty.")
+        for row_index, row in enumerate(matrix):
+            if len(row) == 0:
+                raise ValueError(f"{field_name} row {row_index} cannot be empty.")
             for value in row:
                 if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
                     raise ValueError(f"{field_name} must contain only finite numeric values.")
